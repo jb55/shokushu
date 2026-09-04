@@ -355,6 +355,44 @@ impl Drift {
     pub fn settling(&self) -> bool {
         self.measurements < SETTLED_MEASUREMENTS
     }
+
+    /// How long this rate takes to add up to one frame of slip, or `None` if it
+    /// never would.
+    ///
+    /// A rate in ppm is hard to have a feel for; the same figure as "one frame
+    /// per two hours" is the form the question usually gets asked in, since a
+    /// frame is the unit at which two jam-synced boxes stop agreeing. It is
+    /// `1 / (fps * ppm)`, and nothing more — a restatement of
+    /// [`ppm`](Drift#structfield.ppm), not a second measurement.
+    ///
+    /// Which means it inherits everything wrong with `ppm`, and inherits it
+    /// *worse*: this is a reciprocal, so it stretches the small end. Over the
+    /// 420 s capture in the [type
+    /// docs](Drift#it-is-mostly-noise-and-that-is-measured-rather-than-hedged)
+    /// the figure wandered across -45 to +48 ppm. At the 24 fps those boxes ran
+    /// at, a slip time computed off it would have read about a quarter of an
+    /// hour at either end of that wander, stretched past a week each time the
+    /// estimate came near zero, and passed through "never" on the way across —
+    /// while the crystal underneath did nothing at all. Read it the way you
+    /// would read `ppm`, as an order of magnitude, and take the marks on it
+    /// seriously.
+    ///
+    /// This is drift alone. Two boxes jam-synced to each other also start some
+    /// fraction of a frame apart, and that offset is not measured here, so this
+    /// is how long the *drift* takes to be worth a frame — not how long until
+    /// the two first read differently.
+    ///
+    /// `None` at exactly zero ppm, where there is no slip to time, and for a
+    /// rate small enough that the answer overflows a [`Duration`] — both of
+    /// which mean the same thing in practice, which is that no slip has been
+    /// resolved.
+    pub fn frame_slip(&self, rate: Rate) -> Option<Duration> {
+        let ppm = self.ppm.abs();
+        if ppm == 0.0 || ppm.is_nan() {
+            return None;
+        }
+        Duration::try_from_secs_f64(1.0 / (rate.fps.max(1) as f64 * ppm * 1e-6)).ok()
+    }
 }
 
 /// A local clock anchored to the Tentacle's advertisements.
@@ -693,6 +731,48 @@ mod tests {
 
     fn millis(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    fn drift_of(ppm: f64) -> Drift {
+        Drift {
+            ppm,
+            clamped: false,
+            measurements: 10,
+        }
+    }
+
+    #[test]
+    fn a_slip_time_is_the_reciprocal_of_the_rate() {
+        // 10 ppm at 25 fps: a frame is 40 ms, and 10 ppm adds it up in 4000 s.
+        let slip = drift_of(10.0).frame_slip(RATE).expect("a rate this size slips");
+        assert!((slip.as_secs_f64() - 4000.0).abs() < 1e-6, "got {slip:?}");
+    }
+
+    #[test]
+    fn a_slip_time_ignores_which_clock_is_the_fast_one() {
+        // Which way the two clocks part says nothing about how long they take
+        // to be a frame apart.
+        assert_eq!(
+            drift_of(-10.0).frame_slip(RATE),
+            drift_of(10.0).frame_slip(RATE)
+        );
+    }
+
+    #[test]
+    fn no_rate_is_no_slip_rather_than_a_division_by_zero() {
+        assert_eq!(drift_of(0.0).frame_slip(RATE), None);
+        // And a rate too small to time out inside a `Duration` says the same
+        // thing, which is that nothing has been resolved.
+        assert_eq!(drift_of(1e-300).frame_slip(RATE), None);
+    }
+
+    #[test]
+    fn a_faster_rate_slips_a_frame_sooner() {
+        // Same disagreement between the clocks, but a 50 fps frame is half as
+        // long to lose.
+        let slow = drift_of(10.0).frame_slip(Rate::whole(25)).unwrap();
+        let fast = drift_of(10.0).frame_slip(Rate::whole(50)).unwrap();
+        assert_eq!(fast * 2, slow);
     }
 
     /// Deterministic stand-in for Bluetooth delivery jitter, ±`spread` seconds.

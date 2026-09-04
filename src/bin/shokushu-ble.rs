@@ -24,11 +24,19 @@
 //! extrapolate. It's off by default, and after watching it for seven minutes
 //! against two boxes that is the right default: the figure wandered over -45 to
 //! +48 ppm and never settled, because the ten-second baseline it's measured over
-//! is short against the jitter on the anchors. See
-//! [`Drift`](shokushu::freerun::Drift), which carries the numbers. Reading a
-//! single value as a property of the box in front of you is the mistake this
-//! column invites, so [`drift_column`] marks the two states where it is
-//! especially not one, and the flag stays opt-in.
+//! is short against the jitter on the anchors. See [`Drift`], which carries the
+//! numbers. Reading a single value as a property of the box in front of you is
+//! the mistake this column invites, so [`drift_column`] marks the two states
+//! where it is especially not one, and the flag stays opt-in.
+//!
+//! Beside the ppm the column says how long that rate takes to add up to a
+//! frame, which is the unit the question tends to get asked in: a rate is hard
+//! to have a feel for and "one frame per two hours" isn't. It is the same
+//! figure said differently and not a second one, so the marks in front of it
+//! govern both — and being a reciprocal it is the more excitable of the two,
+//! swinging from minutes to past a week and through "no slip at all" while the
+//! estimate underneath it wanders across zero. [`slip_time`] is coarse for that
+//! reason, and stops naming a number past [`SLIP_HORIZON`].
 //!
 //! Note also what it compares: two free-running oscillators, this host's
 //! included, neither of them a reference. It says the two disagree, never which
@@ -49,7 +57,7 @@ use clap::Parser;
 use shokushu::ble::diagnostics::Diagnosis;
 use shokushu::ble::{self, Advertisement, Date, Event, Scanner};
 use shokushu::freerun::{Drift, Reading};
-use shokushu::Timecode;
+use shokushu::{Rate, Timecode};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -189,7 +197,7 @@ async fn main() -> Result<()> {
             Step::Took(event) if opt.raw => {
                 report_raw(&opt, &mut raw, &scan, start.elapsed().as_secs_f64(), event)
             }
-            Step::Took(event) if opt.json => report_json(&scan, &event),
+            Step::Took(event) if opt.json => report_json(&scan, start, &event),
             // Nothing to do with it here: the scanner has already anchored the
             // clock this event carried, and `render` draws on its own schedule.
             Step::Took(_) => {}
@@ -207,9 +215,11 @@ async fn main() -> Result<()> {
 }
 
 /// One JSON object per reading that actually arrived, uninterpolated.
-fn report_json(scan: &Scanner, event: &Event) {
+fn report_json(scan: &Scanner, start: Instant, event: &Event) {
     let Event::Timecode {
-        id, timecode: tc, ..
+        id,
+        timecode: tc,
+        at,
     } = event
     else {
         return;
@@ -223,8 +233,19 @@ fn report_json(scan: &Scanner, event: &Event) {
     // analysed from, and a field that has to be asked for is one that turns out
     // to be missing from the capture you wanted it in.
     let drift = device.drift();
+    // `host_micros` is this computer's clock at the moment the advertisement
+    // came off the stream, in microseconds since the scan started. It's what
+    // makes a capture analysable offline: every other field here is the
+    // device's account of the time, and without a host stamp beside it there is
+    // nothing to compare them against. It goes last for the same reason the
+    // drift trio did — a reader that knows the older shape still works.
+    //
+    // Relative to the scan, not absolute, because it comes from an `Instant`:
+    // a monotonic counter with no epoch to report. That's the right clock for
+    // measuring an interval and the wrong one for saying when something
+    // happened, and only the first is claimed here.
     println!(
-        r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{},"charging":{},"drift_ppm":{},"drift_clamped":{},"drift_measurements":{}}}"#,
+        r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{},"charging":{},"drift_ppm":{},"drift_clamped":{},"drift_measurements":{},"frame_slip_seconds":{},"host_micros":{}}}"#,
         tc.hours,
         tc.minutes,
         tc.seconds,
@@ -246,6 +267,14 @@ fn report_json(scan: &Scanner, event: &Event) {
         drift.map_or("null".to_string(), |d| format!("{:.3}", d.ppm)),
         drift.map_or("null".to_string(), |d| d.clamped.to_string()),
         drift.map_or("null".to_string(), |d| d.measurements.to_string()),
+        // The same rate said as a time, and null wherever there isn't one to
+        // say — no drift measured yet, or a rate so near zero the answer
+        // overflows. Both mean nothing has been resolved, which `null` says and
+        // a very large number would not.
+        drift
+            .and_then(|d| d.frame_slip(tc.rate))
+            .map_or("null".to_string(), |s| format!("{:.1}", s.as_secs_f64())),
+        at.saturating_duration_since(start).as_micros(),
     );
 }
 
@@ -509,7 +538,7 @@ fn lay_out(mut rows: Vec<Row>, show_drift: bool) -> Vec<String> {
                 // Width held whether or not there's a figure yet, so the note
                 // after it doesn't walk sideways when one arrives.
                 if show_drift {
-                    format!("   {:>11}", drift_column(r.drift))
+                    format!("   {:>26}", drift_column(r.drift, r.tc.rate))
                 } else {
                     String::new()
                 },
@@ -544,7 +573,7 @@ fn lay_out(mut rows: Vec<Row>, show_drift: bool) -> Vec<String> {
 /// the figure is stable to — measured over seven minutes it moves by tens of
 /// ppm — and the resolution is kept anyway, because watching it move is the
 /// only thing on screen that says how little a single reading is worth.
-fn drift_column(drift: Option<Drift>) -> String {
+fn drift_column(drift: Option<Drift>, rate: Rate) -> String {
     let Some(drift) = drift else {
         return "— ppm".to_string();
     };
@@ -553,7 +582,38 @@ fn drift_column(drift: Option<Drift>) -> String {
         (false, true) => "~",
         (false, false) => "",
     };
-    format!("{mark}{:+.1} ppm", drift.ppm)
+    let slip = drift
+        .frame_slip(rate)
+        .map_or(NO_SLIP.to_string(), slip_time);
+    format!("{mark}{:+.1} ppm  {slip}", drift.ppm)
+}
+
+/// What the slip half of the column says when there is no time to give: the
+/// rate is zero, or so near it that a frame is further off than this is willing
+/// to name.
+const NO_SLIP: &str = "— /frame";
+
+/// The horizon past which a slip time stops being a number and becomes "not
+/// measurably drifting". It takes a rate of 0.005 ppm to reach it at 24 fps,
+/// orders of magnitude finer than this estimate resolves, so everything past
+/// here is the estimator on its way through zero and not a crystal that good.
+const SLIP_HORIZON: Duration = Duration::from_secs(99 * 24 * 60 * 60);
+
+/// A slip time in whatever unit keeps it readable.
+///
+/// Coarse on purpose, and coarser than the ppm beside it: the underlying figure
+/// moves by tens of ppm between baselines, so a slip time quoted to the minute
+/// would be inventing precision that the reciprocal has already stretched.
+fn slip_time(d: Duration) -> String {
+    if d > SLIP_HORIZON {
+        return format!("> {} d/frame", SLIP_HORIZON.as_secs() / 86_400);
+    }
+    let s = d.as_secs_f64();
+    match s {
+        _ if s < 90.0 * 60.0 => format!("{:.0} min/frame", s / 60.0),
+        _ if s < 48.0 * 3600.0 => format!("{:.1} h/frame", s / 3600.0),
+        _ => format!("{:.1} d/frame", s / 86_400.0),
+    }
 }
 
 /// The escape sequence that replaces the `previous` lines on screen with these.
@@ -707,7 +767,13 @@ fn short_id(id: &PeripheralId) -> String {
 mod tests {
     use super::*;
     use shokushu::ble::diagnostics::{diagnose, survey, Counts};
-    use shokushu::Rate;
+
+    /// The rate both boxes to hand run at, so a slip time asserted here is one
+    /// that could have come off the display.
+    const RATE: Rate = Rate {
+        fps: 24,
+        drop_frame: false,
+    };
 
     fn row(order: (Instant, &str), name: &str) -> Row {
         Row {
@@ -956,14 +1022,37 @@ mod tests {
         // clock is running at the nominal rate because nothing has measured it
         // yet, and printing that as "+0.0 ppm" would read as a device in
         // perfect agreement with this computer.
-        assert_eq!(drift_column(None), "— ppm");
-        assert!(!drift_column(None).contains('0'));
+        assert_eq!(drift_column(None, RATE), "— ppm");
+        assert!(!drift_column(None, RATE).contains('0'));
     }
 
     #[test]
-    fn a_settled_measurement_is_a_signed_number_and_nothing_else() {
-        assert_eq!(drift_column(measured(12.4)), "+12.4 ppm");
-        assert_eq!(drift_column(measured(-3.0)), "-3.0 ppm");
+    fn a_settled_measurement_is_a_signed_number_and_a_time() {
+        // 12.4 ppm at 24 fps loses a 41.7 ms frame in 3360 s.
+        assert_eq!(drift_column(measured(12.4), RATE), "+12.4 ppm  56 min/frame");
+        assert_eq!(drift_column(measured(-3.0), RATE), "-3.0 ppm  3.9 h/frame");
+    }
+
+    #[test]
+    fn a_slip_time_says_nothing_about_which_clock_is_ahead() {
+        // The sign belongs to the ppm. How long they take to part is the same
+        // either way, and a slip time that changed with the direction would be
+        // claiming otherwise.
+        let fast = drift_column(measured(9.0), RATE);
+        let slow = drift_column(measured(-9.0), RATE);
+        let tail = |c: &str| c.split_once("ppm  ").unwrap().1.to_string();
+        assert_eq!(tail(&fast), tail(&slow));
+        assert_ne!(fast, slow);
+    }
+
+    #[test]
+    fn a_rate_through_zero_stops_naming_a_time_rather_than_naming_a_huge_one() {
+        // The reciprocal's bad end. The estimate wanders across zero, and the
+        // "4800 d/frame" that 0.0001 ppm works out to would read as a crystal
+        // orders of magnitude better than this can resolve, rather than as an
+        // estimator on its way through nothing.
+        assert!(drift_column(measured(0.0), RATE).ends_with(NO_SLIP));
+        assert!(drift_column(measured(0.0001), RATE).ends_with("> 99 d/frame"));
     }
 
     #[test]
@@ -971,7 +1060,7 @@ mod tests {
         // It approaches from below over a minute or two, so an early figure is
         // a number on its way somewhere rather than a reading.
         let early = Some(Drift { ppm: 8.0, clamped: false, measurements: 1 });
-        assert_eq!(drift_column(early), "~+8.0 ppm");
+        assert_eq!(drift_column(early, RATE), "~+8.0 ppm  87 min/frame");
     }
 
     #[test]
@@ -981,13 +1070,16 @@ mod tests {
         // threw out must not print the same.
         let honest = Drift { ppm: 500.0, clamped: false, measurements: 20 };
         let refused = Drift { clamped: true, ..honest };
-        assert_ne!(drift_column(Some(honest)), drift_column(Some(refused)));
-        assert_eq!(drift_column(Some(refused)), "!+500.0 ppm");
+        assert_ne!(
+            drift_column(Some(honest), RATE),
+            drift_column(Some(refused), RATE)
+        );
+        assert_eq!(drift_column(Some(refused), RATE), "!+500.0 ppm  1 min/frame");
 
         // And the refusal outranks the settling mark, since "these anchors were
         // rejected" is the more important of the two things to say.
         let both = Drift { clamped: true, measurements: 1, ..honest };
-        assert!(drift_column(Some(both)).starts_with('!'));
+        assert!(drift_column(Some(both), RATE).starts_with('!'));
     }
 
     #[test]
