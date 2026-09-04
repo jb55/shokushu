@@ -112,7 +112,11 @@ const KIND_TIMECODE: u8 = 0x22;
 const KIND_DATE: u8 = 0x42;
 
 /// The record type and the flags byte, ahead of the data field.
-const HEADER: usize = 2;
+///
+/// Public because it's part of the wire format rather than an implementation
+/// detail: anything describing a payload's shape — the scanner's diagnostics,
+/// say — needs to agree with this parser about where the header ends.
+pub const HEADER: usize = 2;
 
 /// How wide the data field is. Fixed, in every record type and every packet
 /// observed — including across a firmware or configuration change that moved

@@ -11,13 +11,18 @@
 //! clock: two boxes needn't be showing the same timecode, or even running at the
 //! same frame rate.
 //!
+//! When nothing decodes there is nothing to draw, and a blank screen is the one
+//! thing this must never be: `0xFDAC` service data whose payload has changed
+//! looks exactly like an empty room. So the display says what it is taking in
+//! instead — see [`diagnose`].
+//!
 //! `--raw` turns this back into the reconnaissance tool it started as, dumping
 //! advertisement payloads and marking which bytes changed. That's how the
 //! layout in [`tentacle::ble`] was worked out, and it's the way to work out
 //! anything still unknown — how a 29.97 drop-frame device differs, say.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -27,7 +32,7 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, PeripheralId};
 use clap::Parser;
 use futures::stream::StreamExt;
-use tentacle::ble::{self, Advert, Date, Timecode};
+use tentacle::ble::{self, Advert, Date, Timecode, HEADER};
 use tentacle::freerun::{FreeRun, Reading};
 use uuid::Uuid;
 
@@ -74,6 +79,15 @@ struct Seen {
     manufacturer: HashMap<u16, Vec<u8>>,
     service: HashMap<Uuid, Vec<u8>>,
     adverts: u64,
+    /// Service payloads received under `0xFDAC`, and how many of those
+    /// [`ble::parse`] turned down. Only interesting when there's nothing to
+    /// draw, which is exactly when they're the only thing to go on.
+    fdac: u64,
+    unparsed: u64,
+    /// The last payload that didn't parse. A wire format that has moved is
+    /// invisible without the bytes in front of you — this is what put a stop to
+    /// the last one.
+    unparsed_sample: Option<Vec<u8>>,
 }
 
 /// How often to redraw the live display. Comfortably above any frame rate a
@@ -90,6 +104,15 @@ const TICK: Duration = Duration::from_millis(20);
 /// this long. The device stays in `seen`, so if it does return it reappears
 /// where it was rather than jumping to the bottom.
 const LINGER: Duration = Duration::from_secs(30);
+
+/// How long to give timecode before saying what the scan is actually seeing.
+///
+/// Long enough that a healthy Tentacle is never accused of silence: adverts
+/// arrive around three times a second per device and a fresh reading nearly
+/// twice a second, so by this point a box in range has had a dozen chances even
+/// allowing for the burst gaps in `PROTOCOL.md`. Short enough that nobody sits
+/// watching an empty screen wondering whether to press something.
+const GRACE: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -133,6 +156,7 @@ async fn main() -> Result<()> {
     // How many lines the last redraw left on screen, which is what the next one
     // has to move the cursor back up by.
     let mut drawn = 0usize;
+    let mut notice = Notice::new();
     let interpolating = !opt.raw && !opt.json;
     let mut ticker = tokio::time::interval(TICK);
     // Redraws are only worth doing on an even cadence. Catching up on ticks
@@ -144,7 +168,14 @@ async fn main() -> Result<()> {
         let event = tokio::select! {
             _ = &mut deadline => break,
             _ = ticker.tick(), if interpolating => {
-                render(&mut seen, &mut drawn, Instant::now());
+                render(
+                    &mut seen,
+                    &mut drawn,
+                    Instant::now(),
+                    &mut notice,
+                    opt.name.as_deref(),
+                    start.elapsed(),
+                );
                 continue;
             }
             event = events.next() => match event {
@@ -182,6 +213,10 @@ async fn main() -> Result<()> {
     central.stop_scan().await?;
     // Every drawn line ends in a newline, so the cursor is already sitting on a
     // fresh one below the display; there is nothing to add to leave it there.
+    // A diagnostic is the exception — it's deliberately left un-terminated so
+    // it can be rewritten in place, so close it off rather than let the shell
+    // prompt land on top of the last thing we said.
+    notice.finish();
     Ok(())
 }
 
@@ -217,7 +252,12 @@ fn decode(
     let Some(payload) = service_data.get(tentacle_service) else {
         return;
     };
+    seen.fdac += 1;
     let Some(advert) = ble::parse(payload) else {
+        // Not a reading, but the most useful thing there is to say when no
+        // reading ever comes: a Tentacle is right here and we can't read it.
+        seen.unparsed += 1;
+        seen.unparsed_sample = Some(payload.clone());
         return;
     };
 
@@ -268,7 +308,14 @@ struct Row {
 /// Draws a line per device from that device's free-running clock, so each ticks
 /// between its own advertisements instead of only when one lands — and two boxes
 /// in range don't fight over a single line.
-fn render(seen: &mut HashMap<PeripheralId, Seen>, drawn: &mut usize, now: Instant) {
+fn render(
+    seen: &mut HashMap<PeripheralId, Seen>,
+    drawn: &mut usize,
+    now: Instant,
+    notice: &mut Notice,
+    filter: Option<&str>,
+    elapsed: Duration,
+) {
     let mut rows = Vec::new();
 
     for (id, entry) in seen.iter_mut() {
@@ -306,9 +353,264 @@ fn render(seen: &mut HashMap<PeripheralId, Seen>, drawn: &mut usize, now: Instan
     }
 
     let lines = lay_out(rows);
+
+    // The diagnostic and the display want the same line, so only one of them
+    // may hold it. Order matters both ways round: the line has to be given up
+    // before the display draws over it, and claimed only after a redraw that
+    // blanks vacated lines has finished moving the cursor about.
+    if !lines.is_empty() {
+        notice.clear();
+    }
     print!("{}", redraw(&lines, *drawn));
     *drawn = lines.len();
     let _ = std::io::stdout().flush();
+
+    if lines.is_empty() && elapsed >= GRACE {
+        notice.show(diagnose(&census(seen), filter));
+    }
+}
+
+/// What the scan has taken in, gathered across every device.
+///
+/// Consulted only when the display has nothing on it, to tell apart three
+/// failures that otherwise look identical — nothing in range, something in
+/// range whose payload no longer decodes, and a scan delivering no events at
+/// all. The user has been in the middle one of those, staring at the first.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Census {
+    /// Peripherals the adapter reported anything about.
+    devices: usize,
+    /// ... of those, the ones that got past `--name`.
+    matched: usize,
+    /// ... of those, the ones that sent service data under `0xFDAC`.
+    advertisers: usize,
+    /// `0xFDAC` payloads received from them in total.
+    payloads: u64,
+    /// ... of those, the ones [`ble::parse`] turned down.
+    unparsed: u64,
+    /// The last payload that didn't parse, and who sent it.
+    sample: Option<(String, Vec<u8>)>,
+}
+
+fn census(seen: &HashMap<PeripheralId, Seen>) -> Census {
+    // `adverts` is only incremented once a device is past the name filter, so
+    // it's what separates "in range" from "in range and being looked at".
+    let matched: Vec<&Seen> = seen.values().filter(|entry| entry.adverts > 0).collect();
+    survey(seen.len(), &matched)
+}
+
+/// The counting half, split from [`census`] so it can be tested: a
+/// `PeripheralId` can only be minted by the platform, and none of this cares
+/// which device is which beyond having a name to print.
+fn survey(devices: usize, matched: &[&Seen]) -> Census {
+    Census {
+        devices,
+        matched: matched.len(),
+        advertisers: matched.iter().filter(|entry| entry.fdac > 0).count(),
+        payloads: matched.iter().map(|entry| entry.fdac).sum(),
+        unparsed: matched.iter().map(|entry| entry.unparsed).sum(),
+        sample: matched
+            .iter()
+            // Most failures first, name breaking a tie: `seen` hands its values
+            // back in a different order every redraw, and a diagnostic that
+            // blames a different device each time is one nobody believes. A
+            // device with failures always outranks one without, and only a
+            // device with failures has a sample to offer.
+            .max_by_key(|entry| (entry.unparsed, entry.name.as_deref()))
+            .and_then(|entry| Some((name_of(entry).to_string(), entry.unparsed_sample.clone()?))),
+    }
+}
+
+/// A diagnostic, and a key for which failure it describes.
+///
+/// The key exists because the text moves on its own: the device count climbs as
+/// the adapter notices more of the room, and an unreadable payload's timecode
+/// bytes change with every advertisement. Keyed on the text, a redirected
+/// stderr would collect a line per passing pair of headphones and a line per
+/// packet — the scrolling log this is supposed to replace. A terminal rewrites
+/// in place and can afford to stay current; a file keys on this instead. See
+/// [`shape_of`] for what counts as a different unreadable payload.
+struct Diagnosis {
+    key: String,
+    text: String,
+}
+
+impl Diagnosis {
+    fn new(key: &str, text: String) -> Diagnosis {
+        Diagnosis {
+            key: key.to_string(),
+            text,
+        }
+    }
+}
+
+/// One line saying what the scan is taking in, for when none of it decodes.
+///
+/// Ordered most specific first. Every branch has to name something the reader
+/// can act on, because the alternative — which is what this replaced — is a
+/// blank screen that means all of them at once.
+fn diagnose(census: &Census, filter: Option<&str>) -> Diagnosis {
+    let Census {
+        devices,
+        matched,
+        advertisers,
+        payloads,
+        unparsed,
+        sample,
+    } = census;
+
+    if *devices == 0 {
+        return Diagnosis::new(
+            "silent-scan",
+            "no timecode: not one BLE advertisement of any kind has arrived, so nothing is \
+             reaching this process — suspect the scan, not the Tentacles"
+                .to_string(),
+        );
+    }
+    if *matched == 0 {
+        // Nothing can fail a filter that isn't there, so the `None` arm is a
+        // shape the event loop can't produce. Say something true anyway rather
+        // than assert a filter that was never passed.
+        return match filter {
+            Some(want) => Diagnosis::new(
+                "filtered-out",
+                format!(
+                    "no timecode: {} in range, none named like {want:?} — try again without \
+                     --name",
+                    tally(*devices, "BLE device")
+                ),
+            ),
+            None => Diagnosis::new(
+                "nothing-advertising",
+                format!(
+                    "no timecode: {} in range, none of which has advertised anything",
+                    tally(*devices, "BLE device")
+                ),
+            ),
+        };
+    }
+    if let Some((name, bytes)) = sample {
+        let key = format!("unparsed:{}", shape_of(bytes));
+        let bytes = hex(bytes);
+        return Diagnosis::new(
+            &key,
+            format!(
+                "no timecode: {} advertising 0x{:04X}, but {unparsed} of {payloads} payloads \
+                 did not decode — {name} last sent {bytes} (--raw -a dumps them all; see \
+                 PROTOCOL.md)",
+                tally(*advertisers, "device"),
+                ble::SERVICE_UUID_16,
+            ),
+        );
+    }
+    if *advertisers > 0 {
+        return Diagnosis::new(
+            "dates-only",
+            format!(
+                "no timecode: {} advertising 0x{:04X} and all {payloads} payloads decoded, but \
+                 none has carried timecode yet — dates only so far",
+                tally(*advertisers, "device"),
+                ble::SERVICE_UUID_16,
+            ),
+        );
+    }
+    Diagnosis::new(
+        "no-tentacle",
+        format!(
+            "no timecode: {} in range, none advertising 0x{:04X} — no Tentacle here",
+            tally(*matched, "BLE device"),
+            ble::SERVICE_UUID_16,
+        ),
+    )
+}
+
+/// What makes one unreadable payload structurally different from another: the
+/// flags byte and the length.
+///
+/// Deliberately not the whole payload, and deliberately not the record type
+/// either. A timecode record's data bytes change with every advertisement, so
+/// keying on those would put a line in a redirected log two or three times a
+/// second; and a device alternates between timecode and date records in
+/// perfectly normal operation, so keying on the record type makes a single
+/// format failure alternate between two lines forever. What actually moved when
+/// this broke was the header — byte 1 — with the size staying put, and that is
+/// what a second line is worth reporting for.
+fn shape_of(payload: &[u8]) -> String {
+    let flags = payload.get(HEADER - 1).copied().unwrap_or_default();
+    format!("{flags:02x}/{}", payload.len())
+}
+
+/// `1 device` but `2 devices`, so a message about a bug doesn't read like one.
+fn tally(n: usize, thing: &str) -> String {
+    format!("{n} {thing}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Owns one line of diagnostic on stderr.
+///
+/// The display owns stdout and redraws in place, so a diagnostic that scrolls
+/// past it — or worse, is still sitting on the line the display wants — is
+/// worse than none at all. This keeps at most one line, rewrites it only when
+/// the text changes, and gets out of the way the moment there's timecode.
+///
+/// On a terminal that's a single line rewritten in place. Redirected to a file
+/// there's no cursor to move, so each distinct message becomes a line of its
+/// own — which is also what makes the rewrite-on-change rule matter rather than
+/// being an optimisation: without it a redirected stderr would collect fifty
+/// identical lines a second for as long as the box stayed quiet.
+struct Notice {
+    tty: bool,
+    shown: Option<String>,
+    key: Option<String>,
+}
+
+impl Notice {
+    fn new() -> Notice {
+        Notice {
+            tty: std::io::stderr().is_terminal(),
+            shown: None,
+            key: None,
+        }
+    }
+
+    /// Puts a diagnosis on screen, or leaves it be if it's already said.
+    ///
+    /// On a terminal that's per changed word, since rewriting a line in place
+    /// costs nothing and keeping the counts current is worth something. In a
+    /// file it's per changed [`Diagnosis::key`] — same failure, same line, no
+    /// matter how long it lasts.
+    fn show(&mut self, diagnosis: Diagnosis) {
+        let Diagnosis { key, text } = diagnosis;
+        if self.tty {
+            if self.shown.as_deref() == Some(text.as_str()) {
+                return;
+            }
+            eprint!("\r{text}\x1b[K");
+            let _ = std::io::stderr().flush();
+        } else {
+            if self.key.as_deref() == Some(key.as_str()) {
+                return;
+            }
+            eprintln!("{text}");
+        }
+        self.shown = Some(text);
+        self.key = Some(key);
+    }
+
+    /// Gives the line back, for when the display has something to put there.
+    fn clear(&mut self) {
+        self.key = None;
+        if self.shown.take().is_some() && self.tty {
+            eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        }
+    }
+
+    /// Leaves the cursor below the message rather than on it, at exit.
+    fn finish(&mut self) {
+        if self.shown.is_some() && self.tty {
+            eprintln!();
+        }
+    }
 }
 
 /// Puts the rows in a fixed order and formats each one into a line.
@@ -480,6 +782,11 @@ async fn learn_name(central: &Adapter, seen: &mut HashMap<PeripheralId, Seen>, i
     }
 }
 
+/// What to call a device that never answered a properties lookup.
+fn name_of(seen: &Seen) -> &str {
+    seen.name.as_deref().unwrap_or("<unnamed>")
+}
+
 fn name_matches(opt: &Opt, seen: &Seen) -> bool {
     match &opt.name {
         None => true,
@@ -611,6 +918,173 @@ mod tests {
         let mut row = row((at, "00112233"), "Bob");
         row.battery = None;
         assert!(!lay_out(vec![row])[0].contains('%'));
+    }
+
+    /// What [`diagnose`] would say, for the cases that only care about that.
+    fn text_of(census: &Census, filter: Option<&str>) -> String {
+        diagnose(census, filter).text
+    }
+
+    /// A device the scan has noticed, with whatever it has sent so far.
+    fn device(name: &str, fdac: u64, unparsed: u64) -> Seen {
+        Seen {
+            name: Some(name.into()),
+            adverts: 1,
+            fdac,
+            unparsed,
+            unparsed_sample: (unparsed > 0)
+                .then(|| vec![0x22, 0x7d, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_scan_delivering_nothing_says_so() {
+        // The one case where the tool itself is the suspect: not even a passing
+        // phone or a pair of headphones has been seen.
+        let said = text_of(&survey(0, &[]), None);
+        assert!(said.contains("not one BLE advertisement"), "{said}");
+        assert!(said.contains("suspect the scan"), "{said}");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_blames_the_filter() {
+        // 40 devices in range and none of them looked at, which is a --name
+        // typo far more often than it's an absent device.
+        let said = text_of(&survey(40, &[]), Some("rikki"));
+        assert!(said.contains("40 BLE devices"), "{said}");
+        assert!(said.contains("\"rikki\""), "{said}");
+        assert!(said.contains("without --name"), "{said}");
+    }
+
+    #[test]
+    fn a_room_with_no_tentacle_in_it_says_that() {
+        let phone = device("someone's phone", 0, 0);
+        let watch = device("<unnamed>", 0, 0);
+        let said = text_of(&survey(2, &[&phone, &watch]), None);
+        assert!(said.contains("2 BLE devices in range"), "{said}");
+        assert!(said.contains("none advertising 0xFDAC"), "{said}");
+        assert!(said.contains("no Tentacle here"), "{said}");
+    }
+
+    #[test]
+    fn a_payload_that_stopped_decoding_is_reported_with_its_bytes() {
+        // The failure the user actually hit: two Tentacles right there, every
+        // advertisement rejected, and — before this — a blank screen that said
+        // exactly as much as an empty room would have.
+        let ricki = device("Ricki", 160, 160);
+        let liliana = device("Liliana", 151, 151);
+        let said = text_of(&survey(72, &[&ricki, &liliana]), None);
+
+        assert!(said.contains("2 devices advertising 0xFDAC"), "{said}");
+        assert!(said.contains("311 of 311 payloads did not decode"), "{said}");
+        // The bytes are the whole point: a changed wire format can't be worked
+        // out from a count of failures.
+        assert!(said.contains("22 7d 19 0b 25 28 15 5f c6"), "{said}");
+        assert!(said.contains("--raw -a"), "{said}");
+    }
+
+    #[test]
+    fn a_ticking_timecode_is_not_a_new_failure_every_packet() {
+        // The data bytes of a timecode record change with every advertisement.
+        // Keyed on those, a redirected log would take a line two or three times
+        // a second — so the key must look only at the structural bytes.
+        let first = [0x22, 0x7d, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6];
+        let later = [0x22, 0x7d, 0x19, 0x0b, 0x38, 0x21, 0x11, 0xa0, 0x2e];
+        assert_eq!(shape_of(&first), shape_of(&later));
+
+        // Nor is a date record, which a healthy device interleaves with its
+        // timecode: one broken format must not alternate between two lines.
+        let date = [0x42, 0x7d, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0x00];
+        assert_eq!(shape_of(&first), shape_of(&date));
+
+        // A flags byte or a length that moves is a genuinely different payload,
+        // and worth a line of its own — that being the change that broke this.
+        let reflagged = [0x22, 0x7e, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6];
+        assert_ne!(shape_of(&first), shape_of(&reflagged));
+        assert_ne!(shape_of(&first), shape_of(&first[..8]));
+    }
+
+    #[test]
+    fn one_device_reads_as_singular() {
+        let ricki = device("Ricki", 9, 9);
+        let said = text_of(&survey(1, &[&ricki]), None);
+        assert!(said.contains("1 device advertising"), "{said}");
+        assert!(!said.contains("1 devices"), "{said}");
+    }
+
+    #[test]
+    fn dates_arriving_without_timecode_is_its_own_case() {
+        // Parsing fine and still nothing to show. Worth distinguishing: it
+        // means the timecode record specifically is the thing that moved.
+        let ricki = device("Ricki", 4, 0);
+        let said = text_of(&survey(3, &[&ricki]), None);
+        assert!(said.contains("all 4 payloads decoded"), "{said}");
+        assert!(said.contains("none has carried timecode"), "{said}");
+    }
+
+    #[test]
+    fn the_same_device_is_blamed_however_the_map_hands_them_over() {
+        // `seen` iterates in a different order every redraw. A diagnostic that
+        // named a different box each time would be worse than none, so the
+        // worst offender wins and the name breaks a tie.
+        let quiet = device("Aaa", 300, 1);
+        let loud = device("Zzz", 300, 200);
+        let forwards = survey(2, &[&quiet, &loud]);
+        let backwards = survey(2, &[&loud, &quiet]);
+
+        assert_eq!(forwards, backwards);
+        assert_eq!(forwards.sample.unwrap().0, "Zzz");
+    }
+
+    #[test]
+    fn a_device_with_no_failures_is_never_blamed_for_them() {
+        // A healthy box whose name happens to sort last must not be picked as
+        // the offender just for being last.
+        let broken = device("Aaa", 10, 10);
+        let healthy = device("Zzz", 10, 0);
+        let census = survey(2, &[&healthy, &broken]);
+
+        assert_eq!(census.unparsed, 10);
+        assert_eq!(census.sample.unwrap().0, "Aaa");
+    }
+
+    #[test]
+    fn devices_below_the_name_filter_are_counted_but_not_surveyed() {
+        // `census` filters on `adverts`, so a device the loop skipped still
+        // shows in the total. Confirm the split survives into the message.
+        let census = survey(9, &[]);
+        assert_eq!(census.devices, 9);
+        assert_eq!(census.matched, 0);
+        assert_eq!(census.payloads, 0);
+    }
+
+    #[test]
+    fn a_notice_only_writes_when_the_words_change() {
+        // Redirected to a file there is no cursor to rewrite, so an unchanged
+        // message must not be re-emitted — the tick is 20 ms and the quiet case
+        // can last minutes.
+        let mut notice = Notice { tty: false, shown: None, key: None };
+
+        // A count climbing under an unchanged key must not re-emit: the device
+        // count ticks up for as long as the adapter keeps noticing the room.
+        notice.show(Diagnosis::new("no-tentacle", "29 devices".to_string()));
+        assert_eq!(notice.shown.as_deref(), Some("29 devices"));
+        notice.show(Diagnosis::new("no-tentacle", "37 devices".to_string()));
+        assert_eq!(notice.shown.as_deref(), Some("29 devices"));
+
+        // A different failure is a different line.
+        notice.show(Diagnosis::new("unparsed:7d/9", "bytes moved".to_string()));
+        assert_eq!(notice.shown.as_deref(), Some("bytes moved"));
+        // Including the same failure with a different payload shape, since a
+        // wire format that moves twice is worth saying twice.
+        notice.show(Diagnosis::new("unparsed:7e/9", "moved again".to_string()));
+        assert_eq!(notice.shown.as_deref(), Some("moved again"));
+
+        // And it gives the line back when the display wants it.
+        notice.clear();
+        assert_eq!(notice.shown, None);
+        assert_eq!(notice.key, None);
     }
 
     #[test]

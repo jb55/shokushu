@@ -69,6 +69,31 @@ place a Sync E publishes its charge, and reading it costs nothing, since it is i
 a broadcast that was being listened to anyway. How that was established, and how
 far the scale is actually pinned down, is in [PROTOCOL.md](PROTOCOL.md).
 
+When there is nothing to show, it says why rather than showing nothing. An
+empty screen used to mean any of three things — no Tentacle in range, a
+Tentacle in range whose advertisement no longer decodes, or a scan delivering no
+events at all — and looked identical in all three. After three seconds without
+timecode it reports what it is actually taking in, on stderr, as a single line
+that updates in place:
+
+```
+$ tentacle-ble
+adapter state: PoweredOn — scanning until interrupted
+no timecode: 2 devices advertising 0xFDAC, but 22 of 22 payloads did not decode — Liliana last sent 22 7d 19 0b 3b 13 00 93 bf (--raw -a dumps them all; see PROTOCOL.md)
+```
+
+That one is the failure that prompted this: a header byte changed and every
+advertisement was being rejected. Other things it will tell you are that a
+`--name` filter matched none of the devices in range, that devices are in range
+but none of them advertise `0xFDAC`, or that nothing at all is arriving — which
+points at the scan rather than the boxes. The bytes are included because a wire
+format that has moved cannot be worked out from a count of failures.
+
+It stays out of the way once timecode is flowing: the line is given up the
+moment there is a reading to draw, `--json` emits no diagnostics at all, and
+redirecting stderr to a file gets one line per thing that actually changed
+rather than fifty a second.
+
 Worth being clear about: interpolating makes the display *smooth*, not more
 *accurate*. It adds no information the advertisements didn't carry. `--json` is
 left alone for that reason — it emits the readings that actually arrived, and
