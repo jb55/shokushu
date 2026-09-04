@@ -13,6 +13,66 @@
 //! unaffiliated project: Tentacle Sync GmbH neither endorses nor supports it,
 //! and the hardware is named here only to say what this reads.
 //!
+//! # Reading a Tentacle
+//!
+//! The whole path, with the `scan` feature on: find the devices, let the
+//! advertisements land, and ask whichever one you care about what time it is.
+//!
+//! Every timecode advertisement anchors that device's [`freerun`] clock on the
+//! way past, so `reading` answers at whatever rate you ask it. That's the point
+//! of the arrangement — adverts arrive once or twice a second, and a display
+//! driven straight off them lurches a dozen frames at a time.
+//!
+//! ```no_run
+//! # #[cfg(feature = "scan")] {
+//! use std::time::{Duration, Instant};
+//!
+//! use shokushu::ble::Scanner;
+//! use shokushu::freerun::Reading;
+//!
+//! # async fn run() -> shokushu::Result<()> {
+//! let mut scan = Scanner::start().await?;
+//! let mut next_draw = Instant::now();
+//!
+//! loop {
+//!     // Timecode out, on your schedule rather than the device's.
+//!     let now = Instant::now();
+//!     if now >= next_draw {
+//!         next_draw = now + Duration::from_millis(40);
+//!
+//!         for device in scan.devices() {
+//!             // `reading` needs `&mut`, so take it before borrowing the name.
+//!             let reading = device.reading(now);
+//!             let name = device.name().unwrap_or("<unnamed>");
+//!             match reading {
+//!                 Some(Reading::Running(tc)) => println!("{name}  {tc}"),
+//!                 Some(Reading::Lost { last, since }) => {
+//!                     println!("{name}  {last}  quiet for {:.1}s", since.as_secs_f64())
+//!                 }
+//!                 // In range but not sending timecode. Most of what a scan
+//!                 // sees isn't a Tentacle, so this is the common case.
+//!                 None => {}
+//!             }
+//!         }
+//!     }
+//!
+//!     // Advertisements in. Each one anchors its own device's clock as it
+//!     // arrives, whether or not anyone reads the event it produces.
+//!     let Some(_event) = scan.next().await else { break };
+//! }
+//!
+//! scan.stop().await
+//! # }
+//! # }
+//! ```
+//!
+//! The scanner in [`ble`] keeps one clock per device, which is the arrangement
+//! to copy: two boxes anchoring one clock don't average, they fight. Drive a
+//! [`freerun::FreeRun`] yourself when the readings come from somewhere this
+//! crate doesn't scan — your own Bluetooth stack, say, with [`ble::parse`]
+//! turning the service data into a reading. `examples/scan.rs` is this loop
+//! with the raw events shown too.
+//!
 //! # What needs which feature
 //!
 //! The decoders have no dependencies and are always available: [`ble::parse`]
