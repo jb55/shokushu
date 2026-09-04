@@ -48,10 +48,11 @@ const SNAP: Duration = Duration::from_millis(500);
 /// over 40 s with the device on the desk, a quarter of the gaps between fresh
 /// readings ran past a second and the longest was 2.1 s. So anything under about
 /// 3 s would announce a signal loss during ordinary reception, which is what
-/// picked this. Note that extrapolating this far isn't the inaccurate part —
-/// [`MAX_RATE_ERROR`] bounds five seconds of it to a couple of milliseconds. The
-/// reason to stop is that a device switched off looks exactly like a device
-/// that's just quiet, and after a few seconds it's more likely the former.
+/// picked this. Note that extrapolating this far isn't the inaccurate part — a
+/// measured rate is only trusted within 500 ppm of nominal, which holds five
+/// seconds of it to about a millisecond. The reason to stop is that a device
+/// switched off looks exactly like a device that's just quiet, and after a few
+/// seconds it's more likely the former.
 pub const HOLDOVER: Duration = Duration::from_secs(5);
 
 /// Baseline for measuring the device's rate against the host clock. Long,

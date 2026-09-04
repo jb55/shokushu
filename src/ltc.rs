@@ -34,7 +34,7 @@ const PERIOD_ADAPT: f64 = 0.1;
 /// The rate on `timecode` is the one thing here that isn't read off the wire —
 /// nothing in the 80 bits names a frame rate, so it's inferred from the bit
 /// period. The drop-frame flag inside it *is* read off the wire. See
-/// [`LtcFrame::from_register`].
+/// [`LtcDecoder`], which measures the period the rate is snapped from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LtcFrame {
     pub timecode: Timecode,

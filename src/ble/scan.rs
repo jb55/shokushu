@@ -1,8 +1,8 @@
 //! Watching for Tentacles over the air.
 //!
-//! [`ble`](crate::ble) turns bytes into readings; this turns an adapter into
-//! bytes, and keeps a [`Device`] per box so several in range don't have to be
-//! untangled by the caller. There are two ways to read it, and both are wanted:
+//! [`ble`] turns bytes into readings; this turns an adapter into bytes, and
+//! keeps a [`Device`] per box so several in range don't have to be untangled by
+//! the caller. There are two ways to read it, and both are wanted:
 //!
 //! - [`Scanner::next`] hands out one [`Event`] per arrival, which is what a
 //!   logger or a recorder wants.
@@ -45,8 +45,8 @@
 //!
 //! Every advertisement is stamped the moment it comes off the stream, before
 //! anything that could await. A clock anchor is only as good as the host time
-//! paired with it, and a name lookup on the way through would put an unbounded
-//! delay between the two.
+//! paired with it, and the properties lookup on the way through would put an
+//! unbounded delay between the two.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -99,7 +99,13 @@ pub enum Event {
     /// as its own event.
     Battery { id: PeripheralId, status: Status },
 
-    /// A signal-strength update.
+    /// A signal-strength update, as reported by the platform.
+    ///
+    /// Only raised for a `CentralEvent::RssiUpdate`, which a backend needn't
+    /// emit at all: 25 s of watching the raw stream on macOS produced 416
+    /// `DeviceUpdated` and not one `RssiUpdate`. [`Device::rssi`] is the
+    /// reliable way to the same number, since it comes off the properties
+    /// lookup instead.
     Rssi { id: PeripheralId, rssi: i16 },
 
     /// An advertisement under [`SERVICE_UUID_16`](crate::ble::SERVICE_UUID_16)
@@ -107,8 +113,7 @@ pub enum Event {
     ///
     /// Worth surfacing rather than dropping: a Tentacle whose wire format has
     /// moved is otherwise indistinguishable from no Tentacle at all, which is a
-    /// hole this crate has fallen down before. See
-    /// [`diagnostics`](crate::ble::diagnostics).
+    /// hole this crate has fallen down before. See [`diagnostics`].
     Unreadable {
         id: PeripheralId,
         payload: Vec<u8>,
@@ -121,7 +126,8 @@ pub enum Event {
         at: Instant,
     },
 
-    /// This device's clock has gone [`freerun::HOLDOVER`] without an anchor, so
+    /// This device's clock has gone
+    /// [`freerun::HOLDOVER`](crate::freerun::HOLDOVER) without an anchor, so
     /// extrapolation has stopped. Raised once per silence, not per tick.
     Lost {
         id: PeripheralId,
@@ -209,6 +215,9 @@ impl Device {
         self.name.as_deref()
     }
 
+    /// Signal strength in dBm, as of the last properties lookup — which is
+    /// every advertisement, so it tracks. `None` until the first lookup
+    /// answers, and for a platform that reports no signal strength at all.
     pub fn rssi(&self) -> Option<i16> {
         self.rssi
     }
@@ -276,9 +285,8 @@ pub struct Builder {
 impl Builder {
     /// Only take in devices whose name contains `want`, case-insensitively.
     ///
-    /// Devices are still discovered and still counted — see
-    /// [`diagnostics`](crate::ble::diagnostics), which needs to be able to say
-    /// "three in range, none named like that".
+    /// Devices are still discovered and still counted — see [`diagnostics`],
+    /// which needs to be able to say "three in range, none named like that".
     pub fn name(mut self, want: impl Into<String>) -> Builder {
         self.name = Some(want.into());
         self
@@ -362,7 +370,7 @@ impl Scanner {
             tokio::select! {
                 _ = self.holdover.tick() => self.sweep_for_silence(Instant::now()),
                 event = self.events.next() => {
-                    // Stamped before the name lookup below, which awaits.
+                    // Stamped before the properties lookup below, which awaits.
                     let at = Instant::now();
                     self.take_in(event?, at).await;
                 }
@@ -398,10 +406,9 @@ impl Scanner {
     /// Only worth asking once a scan has been running long enough that a
     /// healthy Tentacle would have been heard from — adverts come about three
     /// times a second per device, but reception is bursty enough that a couple
-    /// of seconds of nothing is ordinary. See
-    /// [`diagnostics`](crate::ble::diagnostics) for what it can and can't tell
-    /// apart, and note that it carries no wording: the caller writes the
-    /// sentence.
+    /// of seconds of nothing is ordinary. See [`diagnostics`] for what it can
+    /// and can't tell apart, and note that it carries no wording: the caller
+    /// writes the sentence.
     pub fn diagnosis(&self) -> diagnostics::Diagnosis {
         diagnostics::diagnose(&self.census(), self.filter.is_some())
     }
@@ -418,13 +425,13 @@ impl Scanner {
             return;
         };
         let fresh = self.ensure(&id);
-        self.learn_name(&id).await;
+        self.refresh(&id).await;
 
         // A filtered-out device is still recorded, just not counted: "three in
         // range, none named like that" is a better answer than an empty screen,
         // and needs the ones that didn't match. Nothing past here is raised for
         // one — including its discovery, which can only be reported once the
-        // name lookup has come back with something to filter on.
+        // properties lookup has come back with something to filter on.
         if !self.matches(&id) {
             return;
         }
@@ -548,17 +555,34 @@ impl Scanner {
             .is_some_and(|name| name.to_lowercase().contains(want))
     }
 
-    /// Names only arrive through a properties lookup, so fetch each device's
-    /// once.
-    async fn learn_name(&mut self, id: &PeripheralId) {
+    /// Asks the platform what it knows about a device: its name, and its
+    /// signal strength.
+    ///
+    /// Neither arrives in an advertisement event, so a lookup is the only way
+    /// to either. It runs per advertisement rather than once because
+    /// `RssiUpdate` is not guaranteed to arrive at all — on macOS not one was
+    /// seen in 25 s of watching the raw stream — and a scan that waits for one
+    /// shows no signal strength for the whole of its life. The name is
+    /// still only taken once, since it doesn't change and a later lookup
+    /// answering `None` shouldn't unname a device that has one.
+    ///
+    /// Repeating the lookup is not the new cost it looks like: a device that
+    /// publishes no name never satisfied the old "once" condition either, so
+    /// anonymous advertisers were already being asked on every advertisement.
+    ///
+    /// Note the arrival `Instant` is stamped by the caller before this is
+    /// awaited — see the module docs on arrival times.
+    async fn refresh(&mut self, id: &PeripheralId) {
         let slot = self.index[id];
-        if self.devices[slot].name.is_some() {
-            return;
-        }
         if let Ok(peripheral) = self.central.peripheral(id).await
             && let Ok(Some(properties)) = peripheral.properties().await
         {
-            self.devices[slot].name = properties.local_name;
+            let device = &mut self.devices[slot];
+            if device.name.is_none() {
+                device.name = properties.local_name.or(properties.advertisement_name);
+            }
+            // Keep the last good reading if this lookup didn't carry one.
+            device.rssi = properties.rssi.or(device.rssi);
         }
     }
 }
