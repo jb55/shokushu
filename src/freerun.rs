@@ -92,16 +92,74 @@
 //! [`Rate::drop_frame`](crate::Rate#structfield.drop_frame) before anchoring
 //! one.
 //!
+//! # What a broadcast can and cannot give you
+//!
+//! Rate and phase are not on the same footing here, and the difference decides
+//! what a clock built this way is worth.
+//!
+//! **Rate is recoverable.** Whatever fixed quantity sits between the device's
+//! clock and this host's — the sub-frame bias the [`ble`](crate::ble) module
+//! documents, plus however long a packet takes to cross the air and climb the
+//! host's Bluetooth stack — is the same on every anchor, so it cancels out of
+//! the difference between two of them. That is what [`Drift`] measures, and why
+//! it is a figure about the crystals rather than about the radio.
+//!
+//! **Absolute phase is not.** That same fixed quantity does not cancel out of a
+//! single reading, and nothing in a one-way broadcast can take it apart: a
+//! transmit-path constant, a flight time and a stack delay all look identical
+//! to a receiver that only ever listens. Separating them wants a round trip —
+//! send something, have it come back, halve the difference — which is what NTP
+//! and PTP do and what an advertisement, by construction, cannot offer. So a
+//! clock built from advertisements sits at an unknown fixed offset from the
+//! device's, and nothing here pretends otherwise: [`Drift`] is a rate, and
+//! there is deliberately no method in this module that reports an offset.
+//!
+//! How big that offset is, is itself unmeasured. The sub-frame bias is about
+//! 3.6 ms; the delivery delay is bounded below by nothing this can see, since
+//! only its spread is observable and not its floor. Both are small against a
+//! 41.7 ms frame at 24 fps, which is why a display built on this looks right —
+//! but "small" is not "known", and a frame-accurate claim wants a number rather
+//! than an argument. The device's `0xfdac` GATT service is where one would have
+//! to come from, being a connection and so timeable in both directions;
+//! `PROTOCOL.md` records what is known about it.
+//!
+//! # How long it holds
+//!
+//! **With a box in range, indefinitely** — in the sense that matters, which is
+//! that the error stops accumulating. Every window's anchor pulls the clock
+//! back towards the device, so what is left is anchor noise rather than a walk:
+//! over 1800 s on 2026-09-04, two Sync E boxes at 24 fps on macOS, the clock
+//! stayed within 1.0 ms of a straight line through the readings, against
+//! 20.8 ms for half a frame. The unknown constant offset above is not in that
+//! figure and cannot be.
+//!
+//! **With the box gone, this stops after [`HOLDOVER`]** — five seconds — and
+//! says so. That is a policy about knowing whether the device is still there
+//! rather than a limit on the arithmetic: a switched-off box and a quiet one
+//! look identical, and after a few seconds the first is likelier. The clock
+//! itself would hold much longer, and what bounds it is the error in the
+//! measured rate, which over that capture sat 4.6 to 5.2 ppm from the
+//! reference — half a frame in a bit over an hour.
+//!
+//! Read that hour as arithmetic on a rate measured over half an hour at room
+//! temperature, and not as an hour of holdover that anyone has watched. A
+//! crystal whose rate changes — temperature being the usual reason — spoils it,
+//! and nothing here would find out until the device came back.
+//!
 //! # How it works
 //!
 //! Three things make it more than `anchor + elapsed`:
 //!
-//! - **Jitter.** An advertisement's sub-frame field places it to well under a
-//!   millisecond, but not exactly, so snapping to each new one nudges the clock
-//!   back and forth — and a timecode display that ticks backwards reads as
-//!   broken however small the step. Each anchor's error is folded in a fraction
-//!   at a time instead, which averages the jitter down, and the position handed
-//!   out never decreases.
+//! - **Jitter, and which way it points.** An advertisement's sub-frame field
+//!   places it to well under a millisecond, but its delivery doesn't: a packet
+//!   can reach the host late and never early, so an anchor's error has a hard
+//!   ceiling and a long tail below it. Averaging anchors therefore measures how
+//!   busy the Bluetooth stack was as much as it measures a clock. Readings are
+//!   batched over three seconds instead and only the least delayed of each batch
+//!   is used — the same trick NTP and PTP play on the same problem — and its
+//!   error is then folded in a fraction at a time rather than snapped to, since
+//!   a timecode display that ticks backwards reads as broken however small the
+//!   step. The position handed out never decreases.
 //! - **Drift.** Host and Tentacle keep time on separate crystals, so
 //!   extrapolating at exactly the nominal frame rate walks off over a long run.
 //!   The real rate is measured from anchors over a long baseline, bounded to the
@@ -128,6 +186,62 @@ const SLEW_GAIN: f64 = 0.5;
 /// device, or a jam-sync — rather than jitter, so snap to it instead of spending
 /// a minute slewing there.
 const SNAP: Duration = Duration::from_millis(500);
+
+/// How long a batch of readings is gathered over before the least delayed of
+/// them is used as the anchor.
+///
+/// The reason there is a window at all is that Bluetooth delivery error is
+/// one-sided. An advertisement can reach the host late and never early, so the
+/// residuals have a hard ceiling and a long tail below it, and the *average* of
+/// a batch sits somewhere down the tail — which is to say it measures how busy
+/// the stack was. The least delayed reading is the one nearest the ceiling, and
+/// the ceiling is where the device actually is. Taking the minimum of a batch
+/// rather than the mean is what NTP and PTP do with the same problem, and it is
+/// the whole of the idea.
+///
+/// A window trades latency for how good that minimum is: more readings to pick
+/// from is a better estimate of the ceiling, at the cost of correcting the
+/// clock less often and taking longer to say anything about the rate. Measured
+/// rather than argued, over 1800 s on 2026-09-04 — two Sync E boxes at 24 fps,
+/// macOS, replayed offline through this same model at each setting by
+/// `analysis/freerun_replay.py`, scored against a reference fitted on half the
+/// capture and evaluated on the other half:
+///
+/// ```text
+///   window    anchor noise    worst excursion    the --drift column
+///     none    0.69-0.83 ms     15.8-56.9 ms         sd 18 ppm
+///       1s    0.55-0.57 ms      1.3-20.8 ms         sd 13 ppm
+///       3s    0.29-0.34 ms      0.9- 1.0 ms         sd  5-6 ppm
+///       8s    0.10-0.12 ms      0.2- 0.4 ms         sd  2 ppm
+/// ```
+///
+/// The excursion column is not monotonic on the way down, and that is the
+/// useful part of it: a one-second window still let one of the two boxes be
+/// dragged 20.8 ms, half a frame, because a second is short enough that a whole
+/// window can be late together. Three is past that on both boxes.
+///
+/// "Anchor noise" is the timing error on one anchor, recovered from the scatter
+/// of the rate measurements; it is the column that compares settings fairly,
+/// since unlike the raw ppm scatter it doesn't shrink merely because a longer
+/// window stretched the baseline.
+///
+/// Three seconds is where that was settled, and the choice is a judgement and
+/// not a computation — the table keeps improving to the right. Against going
+/// further: an anchor arrives once per window, so the window is also how long
+/// the clock can go uncorrected while hearing the device perfectly well, and
+/// past about five seconds that starts to rival [`HOLDOVER`], which is the
+/// length of time this module treats as meaning something quite different. It
+/// also stretches the rate baseline — 10 s nominal becomes 12.1-12.4 s here —
+/// and a longer baseline is a real way to sharpen the rate but it should be
+/// [`RATE_BASELINE`]'s decision, taken deliberately, rather than something a
+/// window smuggles in. Here it becomes 12.2-12.5 s.
+///
+/// The worst-excursion column is the one to read for what this bought. No gap
+/// in reception came anywhere near [`HOLDOVER`] in that capture — not one of
+/// the 11,914 readings followed another by as much as five seconds — so the
+/// 56.9 ms is not a dropout being resumed from. It is the unfiltered clock being dragged more than a whole frame by a
+/// run of late deliveries, which is the failure this exists to prevent.
+const ANCHOR_WINDOW: Duration = Duration::from_millis(3000);
 
 /// How long to keep extrapolating with nothing arriving.
 ///
@@ -423,16 +537,27 @@ impl FreeRun {
     /// the host time it represents. Stamp [`Instant::now`] as the packet comes
     /// off the wire, before any await or lookup, and pass that.
     ///
-    /// Call it for every reading. There's no need to filter or rate-limit —
-    /// jitter averaging is the reason it wants them all, and a duplicate
-    /// advertisement is just an anchor with nothing to correct.
+    /// Call it for every reading, and don't filter or rate-limit first: this
+    /// picks the reading it wants out of the ones it is given, so anything
+    /// discarded on the way in is a candidate it never gets to choose. The
+    /// duplicate copies of one advertisement are worth passing on for exactly
+    /// that reason — they carry the same timecode at different arrival times,
+    /// so the first of them is the least delayed reading in the batch and the
+    /// rest lose on their own merits.
     ///
     /// # What an anchor does
     ///
-    /// Usually half of one anchor's error, and deliberately only half: the rest
-    /// is left to the anchors after it, so jitter averages out instead of being
-    /// chased. Four cases aren't ordinary, and all four are decided here rather
-    /// than by the caller:
+    /// Usually nothing yet. Readings are gathered over a three-second window and
+    /// only the least delayed of them moves the clock, because Bluetooth
+    /// delivery error is one-sided: a packet can arrive late and never early,
+    /// so the best reading of a batch is the extreme of them and not the
+    /// average. When that one is applied it moves the clock half of its error,
+    /// and deliberately only half — the rest is left to the anchors after it.
+    ///
+    /// Four cases aren't ordinary, and all four are decided here rather than by
+    /// the caller. The first three bypass the window, since all three mean the
+    /// model the window's candidates were measured against no longer describes
+    /// anything:
     ///
     /// - **The first one** starts the clock, at the nominal frame rate.
     /// - **A different [`Rate`]** means another device or a reconfigured one,
@@ -445,6 +570,8 @@ impl FreeRun {
     ///   clock on the new reading while keeping the measured rate, since the
     ///   crystals didn't change while the signal was gone. A device coming back
     ///   resumes cleanly rather than slewing across however long it was away.
+    /// - **Every other reading** joins the window, and is either the least
+    ///   delayed one seen in it so far or is discarded.
     ///
     /// Nothing here reports which case it took. If you need to know that a
     /// device went quiet, watch for [`Reading::Lost`] from
@@ -472,26 +599,58 @@ impl FreeRun {
             return;
         }
 
+        // Coming back from a dropout, the model has been sitting still while the
+        // device kept going, so there is nothing to slew towards: reseat on the
+        // new reading, keeping the rate, since the crystals didn't change. This
+        // is checked before anything involving the model, because after a long
+        // enough silence the model's prediction is meaningless.
+        if at.saturating_duration_since(state.anchored) > HOLDOVER {
+            let rate = state.rate;
+            let position = unwrap_day(tc.frame_position(), state.extrapolate(at), tc.rate);
+            self.state = Some(State::new(tc, position, at, rate));
+            return;
+        }
+
+        // Close a window this reading falls outside of before measuring the
+        // reading against the model, so that every candidate in a window is
+        // judged against the same clock. Comparing the first reading of a
+        // window against the old model and the rest against the corrected one
+        // would be comparing delays that were never measured from the same
+        // place.
+        if let Some(window) = state.window.filter(|window| at >= window.ends) {
+            state.window = None;
+            state.fold_in(window);
+        }
+
         let predicted = state.extrapolate(at);
         let position = unwrap_day(tc.frame_position(), predicted, tc.rate);
         let error = position - predicted;
 
-        // Coming back from a dropout, the model has been sitting still while the
-        // device kept going, and a timecode that was set on the device is a
-        // genuine discontinuity. Neither is something to slew towards: reseat on
-        // the new reading, keeping the rate, since the crystals didn't change.
-        let resumed = at.saturating_duration_since(state.anchored) > HOLDOVER;
-        if resumed || error.abs() > SNAP.as_secs_f64() * state.rate.fps {
+        // A timecode set on the device is a genuine discontinuity, and waiting
+        // out a window before showing it would be a display that lies for three
+        // seconds. Snap, and throw away candidates measured against a model
+        // that no longer describes anything.
+        if error.abs() > SNAP.as_secs_f64() * state.rate.fps {
             let rate = state.rate;
             self.state = Some(State::new(tc, position, at, rate));
             return;
         }
 
-        state.measure_rate(position, at);
-        state.pos = predicted + SLEW_GAIN * error;
-        state.at = at;
+        // Heard from, whichever way the reading is used. Holdover and
+        // `last_received` are about reception; only the model is filtered.
         state.anchored = at;
         state.last = *tc;
+
+        match &mut state.window {
+            // Less delayed than anything else this window, so it becomes the
+            // candidate. `error` is signed and larger is better: a late
+            // delivery reads as a device further behind the model than it is.
+            Some(window) if error > window.error => {
+                *window = Window { position, at, error, ..*window };
+            }
+            Some(_) => {}
+            none => *none = Some(Window { position, at, error, ends: at + ANCHOR_WINDOW }),
+        }
     }
 
     /// What to show now. `None` until the first advertisement has landed.
@@ -556,9 +715,15 @@ impl FreeRun {
     ///
     /// `None` until a measurement exists, which is two things at once: a clock
     /// that has never been anchored, and one that has been anchored but hasn't
-    /// yet seen a full `RATE_BASELINE` — ten seconds — of anchors to measure
-    /// over. Both are reported the same way because in both the honest answer
-    /// is that nothing has been measured. A rate has to be *assumed* before
+    /// yet seen a full baseline — ten seconds — of anchors to measure over.
+    /// Both are reported the same way because in both the honest answer is that
+    /// nothing has been measured.
+    ///
+    /// Reckon on up to about sixteen seconds rather than ten. A baseline can
+    /// only be closed by an anchor, and anchors come once per three-second
+    /// window however fast the advertisements arrive — so the baseline's start
+    /// and its end are both quantised to a window, and the first figure appears
+    /// a couple of them after the ten seconds are up. A rate has to be *assumed* before
     /// then, and it's assumed to be exactly nominal, so quoting it would report
     /// zero drift for every device in its first ten seconds. That reads as a
     /// finding and is an artefact.
@@ -618,6 +783,28 @@ impl RateEstimate {
     }
 }
 
+/// The least-delayed reading of the window in progress.
+///
+/// Bluetooth delivery error is one-sided — an advertisement can reach the host
+/// late and never early — so the best reading of a batch is not the average of
+/// them but the extreme one. `error` is what ranks them: the reading that sits
+/// furthest ahead of the model is the one that spent least time in the stack.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    /// The candidate's frame position, already day-unwrapped against the model.
+    position: f64,
+    /// When it arrived.
+    at: Instant,
+    /// How far ahead of the model it read, in frames. Signed, and larger is
+    /// less delayed.
+    error: f64,
+    /// When this window stops accepting candidates. Fixed at the window's first
+    /// reading, so a window is a span of host time rather than a count of
+    /// readings — the arrival rate is far too bursty for a count to mean the
+    /// same thing twice.
+    ends: Instant,
+}
+
 #[derive(Debug)]
 struct State {
     /// The rate the device is running at, as it named it. Distinct from
@@ -636,6 +823,8 @@ struct State {
     anchored: Instant,
     /// Where the rate measurement is currently counting from.
     rate_from: (f64, Instant),
+    /// The best reading of the window in progress, if one is open.
+    window: Option<Window>,
 }
 
 impl State {
@@ -649,12 +838,30 @@ impl State {
             last: *tc,
             anchored: at,
             rate_from: (position, at),
+            // A fresh model has nothing to compare candidates against, so the
+            // window starts empty rather than carrying one measured against
+            // the clock this replaces.
+            window: None,
         }
     }
 
     /// Where the model says the device is at `now`.
     fn extrapolate(&self, now: Instant) -> f64 {
         self.pos + secs_between(now, self.at) * self.rate.fps
+    }
+
+    /// Folds a closed window's least-delayed reading into the model, as the
+    /// one anchor that batch produces.
+    ///
+    /// The prediction is recomputed here rather than carried on the `Window`.
+    /// Nothing applies an anchor while a window is open, so the two agree — but
+    /// deriving it from the model at the moment of use is what keeps that an
+    /// observation about the code rather than a thing to preserve.
+    fn fold_in(&mut self, window: Window) {
+        let predicted = self.extrapolate(window.at);
+        self.measure_rate(window.position, window.at);
+        self.pos = predicted + SLEW_GAIN * (window.position - predicted);
+        self.at = window.at;
     }
 
     /// Re-measures how fast the device runs against the host clock, over a
@@ -913,6 +1120,110 @@ mod tests {
         }
     }
 
+    /// Bluetooth delivery as it actually behaves: mostly prompt, sometimes very
+    /// late, never early. `n` readings a second, of which one in four gets
+    /// through with no delay and the rest are held up by `late`.
+    fn one_sided(clock: &mut FreeRun, t0: Instant, seconds: u64, late: f64) {
+        for tick in 0..seconds * 10 {
+            let emitted = tick as f64 / 10.0;
+            let delay = if tick % 4 == 0 { 0.0 } else { late };
+            clock.anchor(
+                &at(10.0 + emitted),
+                t0 + Duration::from_secs_f64(emitted + delay),
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_reading_does_not_drag_the_clock_a_prompt_one_reached() {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+
+        // Two minutes of adverts, three quarters of them 20 ms late — half a
+        // frame at 25 fps, and the shape the residuals really have: a ceiling
+        // with a tail below it. Anchoring on every reading settles the clock
+        // near the *mean* of that, about 15 ms behind the device. Anchoring on
+        // the least delayed of each window settles it on the ceiling, which is
+        // where the device actually is.
+        one_sided(&mut clock, t0, 120, 0.020);
+
+        let shown = seconds_shown(&mut clock, t0 + Duration::from_secs(120));
+        let error = shown - (10.0 + 120.0);
+        assert!(
+            error.abs() < 0.003,
+            "settled {} ms from the device, which is the mean delay and not the floor",
+            error * 1000.0
+        );
+    }
+
+    #[test]
+    fn the_second_copy_of_an_advertisement_loses_to_the_first() {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+        clock.anchor(&at(10.0), t0);
+
+        // Every reading arrives two or three times, byte-identical, a
+        // millisecond or so apart — see PROTOCOL.md. The copies carry the same
+        // timecode, so the later ones are the same reading delivered worse, and
+        // the window has to prefer the first. Feeding the pair in the other
+        // order has to give the same answer, or what's being selected is
+        // arrival order rather than delay.
+        let first_then_second = {
+            let mut c = FreeRun::default();
+            c.anchor(&at(10.0), t0);
+            c.anchor(&at(10.6), t0 + millis(600));
+            c.anchor(&at(10.6), t0 + millis(605));
+            c.anchor(&at(14.0), t0 + millis(4000));
+            seconds_shown(&mut c, t0 + millis(4000))
+        };
+        let second_then_first = {
+            let mut c = FreeRun::default();
+            c.anchor(&at(10.0), t0);
+            c.anchor(&at(10.6), t0 + millis(605));
+            c.anchor(&at(10.6), t0 + millis(600));
+            c.anchor(&at(14.0), t0 + millis(4000));
+            seconds_shown(&mut c, t0 + millis(4000))
+        };
+        assert_eq!(first_then_second, second_then_first);
+    }
+
+    #[test]
+    fn a_window_holds_its_correction_and_then_applies_it() {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+        clock.anchor(&at(10.0), t0);
+
+        // A reading 10 ms ahead of the model, well inside the snap threshold.
+        // Nothing moves while the window is open — there may yet be a less
+        // delayed reading in it — and it lands once a reading past the window
+        // closes it.
+        let before = seconds_shown(&mut clock, t0 + millis(600));
+        clock.anchor(&at(10.61), t0 + millis(600));
+        assert_eq!(seconds_shown(&mut clock, t0 + millis(600)), before);
+
+        clock.anchor(&at(14.0), t0 + millis(4000));
+        let moved = seconds_shown(&mut clock, t0 + millis(4000)) - 14.0;
+        assert!(
+            moved.abs() < 0.011,
+            "the window's reading never landed: {} ms out",
+            moved * 1000.0
+        );
+    }
+
+    #[test]
+    fn a_jam_sync_does_not_wait_for_the_window() {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+        clock.anchor(&at(10.0), t0);
+        clock.anchor(&at(10.6), t0 + millis(600));
+
+        // A timecode set on the device is a discontinuity, not a late delivery,
+        // and a display that went on showing the old hour for three seconds
+        // while a window filled would be lying. It shows immediately.
+        clock.anchor(&at(3600.0), t0 + millis(700));
+        assert!((seconds_shown(&mut clock, t0 + millis(700)) - 3600.0).abs() < FRAME);
+    }
+
     #[test]
     fn says_so_when_the_signal_goes() {
         let t0 = Instant::now();
@@ -1031,7 +1342,13 @@ mod tests {
         // refuse.
         assert!(run_at(1.0, 9).drift().is_none());
 
-        let drift = run_at(1.0, 11).drift().expect("a baseline has gone by");
+        // Sixteen rather than eleven because a baseline can only close on an
+        // anchor, and `ANCHOR_WINDOW` means anchors arrive once every three
+        // seconds however fast the adverts do. `RATE_BASELINE` is the span a
+        // measurement needs; both ends of it are quantised to a window, so the
+        // anchor that closes the first one turns up a good deal after the ten
+        // seconds are up. See `FreeRun::drift`.
+        let drift = run_at(1.0, 16).drift().expect("a baseline has gone by");
         assert_eq!(drift.measurements, 1);
         assert!(drift.settling(), "one baseline in is not settled");
     }
@@ -1056,7 +1373,7 @@ mod tests {
         // The reason `settling` exists: one baseline in, a device running 200
         // ppm fast reports about 50, and nothing is wrong. Quoting that figure
         // without saying it is provisional is quoting a quarter of the answer.
-        let drift = run_at(1.0 + 200e-6, 11).drift().expect("one baseline");
+        let drift = run_at(1.0 + 200e-6, 16).drift().expect("one baseline");
         assert!(drift.settling());
         assert!(
             drift.ppm < 100.0,

@@ -18,10 +18,12 @@
 //! The whole path, with the `scan` feature on: find the devices, let the
 //! advertisements land, and ask whichever one you care about what time it is.
 //!
-//! Every timecode advertisement anchors that device's [`freerun`] clock on the
+//! Every timecode advertisement goes to that device's [`freerun`] clock on the
 //! way past, so `reading` answers at whatever rate you ask it. That's the point
 //! of the arrangement — adverts arrive once or twice a second, and a display
-//! driven straight off them lurches a dozen frames at a time.
+//! driven straight off them lurches a dozen frames at a time. The clock takes
+//! the least delayed advertisement of each batch as its anchor rather than
+//! every one of them, which is [`freerun`]'s business and not the scanner's.
 //!
 //! ```no_run
 //! # #[cfg(feature = "scan")] {
@@ -56,7 +58,7 @@
 //!         }
 //!     }
 //!
-//!     // Advertisements in. Each one anchors its own device's clock as it
+//!     // Advertisements in. Each one goes to its own device's clock as it
 //!     // arrives, whether or not anyone reads the event it produces.
 //!     let Some(_event) = scan.next().await else { break };
 //! }

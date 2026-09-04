@@ -12,7 +12,7 @@
 //!   dozen frames at a time; see [`freerun`](crate::freerun).
 //!
 //! Both views are live at once and cost nothing extra: every timecode
-//! advertisement anchors its device's clock on the way past, whether or not
+//! advertisement goes to its device's clock on the way past, whether or not
 //! anyone reads the event.
 //!
 //! ```no_run
@@ -82,7 +82,9 @@ pub enum Event {
     /// First sight of a peripheral, Tentacle or not.
     Discovered { id: PeripheralId },
 
-    /// Timecode arrived, and has already anchored this device's clock.
+    /// Timecode arrived, and has already gone to this device's clock — which
+    /// keeps it as a candidate rather than anchoring on it directly. See
+    /// [`freerun`](crate::freerun).
     Timecode {
         id: PeripheralId,
         timecode: Timecode,

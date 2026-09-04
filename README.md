@@ -357,12 +357,36 @@ packets it has to reject. The free-running clock is tested against synthesized
 anchors: that it walks every frame between two adverts, never goes backwards
 under jitter far worse than reception really is, stays inside a frame of a
 device whose crystal drifts, reports signal loss instead of extrapolating
-through it, and snaps rather than slews when the timecode is changed on the
-device.
+through it, snaps rather than slews when the timecode is changed on the device,
+and settles on the *least delayed* of a batch of readings rather than the
+average of them — which is the difference between tracking the device and
+tracking the Bluetooth stack's mood, and is worth about 17 ms.
 
 All of that is in the always-available decoders, so a bare `cargo test` runs it.
 The scanner's own tests sit behind `scan`; `cargo test --all-features` is the
 whole suite.
+
+## Tuning the clock
+
+The synthesized tests say the clock is correct. They can't say what its
+constants should be — how long to gather readings over before taking the least
+delayed as the anchor, how much of an error to take out at once — because that
+depends on how Bluetooth actually delivers, which is a property of the room.
+
+`analysis/freerun_replay.py` replays a recorded capture through the same model
+at a range of settings and prints what each one costs:
+
+```
+cargo run --features scan,cli --bin shokushu-ble -- --json --seconds 1800 > capture.json
+python3 analysis/freerun_replay.py capture.json
+```
+
+No dependencies. It fits a reference clock through the least-delayed reading of
+each bin — delivery error is one-sided, so the device's real clock is the top of
+the scatter and not its middle — on half the capture, and scores every setting
+on the other half. Its header explains what that assumes, which is mostly that a
+crystal is linear over half an hour. With two boxes in range it also differences
+them, which cancels the host clock they were both measured against.
 
 ## License
 

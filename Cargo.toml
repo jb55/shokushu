@@ -5,6 +5,9 @@ edition = "2024"
 description = "Reads timecode from a Tentacle Sync E: over Bluetooth LE without pairing, or as SMPTE LTC from an audio input"
 license = "MIT"
 repository = "https://github.com/jb55/shokushu"
+# `analysis/` is a python replay harness for tuning the clock against a recorded
+# capture — a development tool, and nothing a dependent builds against.
+exclude = ["analysis"]
 
 [features]
 # Nothing on. A `cargo add shokushu` gets the decoders and no dependencies at

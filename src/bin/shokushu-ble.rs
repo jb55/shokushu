@@ -21,13 +21,18 @@
 //!
 //! `--drift` adds a column for how far each box's clock runs from this
 //! computer's, which the free-running clock has to measure anyway in order to
-//! extrapolate. It's off by default, and after watching it for seven minutes
-//! against two boxes that is the right default: the figure wandered over -45 to
-//! +48 ppm and never settled, because the ten-second baseline it's measured over
-//! is short against the jitter on the anchors. See [`Drift`], which carries the
-//! numbers. Reading a single value as a property of the box in front of you is
-//! the mistake this column invites, so [`drift_column`] marks the two states
-//! where it is especially not one, and the flag stays opt-in.
+//! extrapolate. It's off by default, and it goes on earning that. Watched for
+//! seven minutes against two boxes, the figure used to wander over -45 to
+//! +48 ppm and never settle, because the ten-second baseline it is measured
+//! over was short against the jitter on the anchors either end of it. Filtering
+//! those anchors — the clock now takes the least delayed reading of each window
+//! rather than every reading, see [`Drift`] — cut that by about three, to a
+//! spread of 5 to 6 ppm over a range of roughly ±23, measured over 1800 s
+//! against a rate that came out at +7.7 ppm across the whole capture. Better, and still
+//! not a number to quote off one look. Reading a single value as a property of
+//! the box in front of you is the mistake this column invites, so
+//! [`drift_column`] marks the two states where it is especially not one, and the
+//! flag stays opt-in.
 //!
 //! Beside the ppm the column says how long that rate takes to add up to a
 //! frame, which is the unit the question tends to get asked in: a rate is hard
