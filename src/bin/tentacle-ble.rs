@@ -32,8 +32,9 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, PeripheralId};
 use clap::Parser;
 use futures::stream::StreamExt;
-use tentacle::ble::{self, Advert, Date, Timecode, HEADER};
+use tentacle::ble::{self, Advert, Date, HEADER};
 use tentacle::freerun::{FreeRun, Reading};
+use tentacle::Timecode;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -275,8 +276,8 @@ fn decode(
                     tc.minutes,
                     tc.seconds,
                     tc.frames,
-                    tc.subframe_micros,
-                    tc.fps,
+                    tc.subframe.as_micros(),
+                    tc.rate.fps,
                     seen.name.as_deref().unwrap_or("<unnamed>"),
                     seen.date.map_or("null".into(), |d| format!("\"{d}\"")),
                     seen.rssi.map_or("null".to_string(), |r| r.to_string()),
@@ -637,7 +638,7 @@ fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
                 "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}{}",
                 r.tc,
                 tenth(r.tc.subframe_fraction()),
-                r.tc.fps,
+                r.tc.rate.fps,
                 r.name,
                 r.date.map_or(String::new(), |d| format!("   {d}")),
                 r.rssi.map_or(String::new(), |v| format!("   {v} dBm")),
@@ -826,17 +827,14 @@ fn short_id(id: &PeripheralId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tentacle::Rate;
 
     fn row(order: (Instant, &str), name: &str) -> Row {
         Row {
             order: (order.0, order.1.into()),
             tc: Timecode {
-                fps: 25,
-                hours: 9,
-                minutes: 44,
-                seconds: 22,
-                frames: 13,
-                subframe_micros: 12_000,
+                subframe: Duration::from_micros(12_000),
+                ..Timecode::new(9, 44, 22, 13, Rate::whole(25))
             },
             name: name.into(),
             date: None,

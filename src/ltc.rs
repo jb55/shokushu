@@ -10,6 +10,8 @@
 //! consecutive ones cannot occur in the payload, so the sync word is what lets
 //! us find frame boundaries in a free-running bit stream.
 
+use crate::timecode::{Rate, Timecode};
+
 /// Bits in one LTC frame.
 pub const FRAME_BITS: usize = 80;
 
@@ -28,13 +30,14 @@ const SILENCE_FLOOR: f64 = 0.001;
 const PERIOD_ADAPT: f64 = 0.1;
 
 /// One decoded LTC frame.
+///
+/// The rate on `timecode` is the one thing here that isn't read off the wire —
+/// nothing in the 80 bits names a frame rate, so it's inferred from the bit
+/// period. The drop-frame flag inside it *is* read off the wire. See
+/// [`LtcFrame::from_register`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LtcFrame {
-    pub hours: u8,
-    pub minutes: u8,
-    pub seconds: u8,
-    pub frames: u8,
-    pub drop_frame: bool,
+    pub timecode: Timecode,
     pub color_frame: bool,
     /// The eight 4-bit user-data groups, in transmission order.
     pub user_bits: [u8; 8],
@@ -43,9 +46,15 @@ pub struct LtcFrame {
 impl LtcFrame {
     /// Parses the 80 bits of a frame, newest bit in the low position of `reg`.
     ///
+    /// `measured_fps` is the rate implied by the bit period the decoder has
+    /// locked to. It's needed because the frame itself doesn't carry one: the
+    /// [`Rate`] this builds is that measurement snapped to the nearest rate
+    /// anyone runs LTC at, with the drop-frame flag — which *is* on the wire —
+    /// beside it.
+    ///
     /// Returns `None` if any BCD field is out of range, which is the cheapest
     /// check we have against a bit slip that happened to land on a sync word.
-    fn from_register(reg: u128) -> Option<LtcFrame> {
+    fn from_register(reg: u128, measured_fps: f64) -> Option<LtcFrame> {
         let frames = field(reg, 0, 4) + field(reg, 8, 2) * 10;
         let seconds = field(reg, 16, 4) + field(reg, 24, 3) * 10;
         let minutes = field(reg, 32, 4) + field(reg, 40, 3) * 10;
@@ -60,12 +69,9 @@ impl LtcFrame {
             *slot = field(reg, 4 + group * 8, 4);
         }
 
+        let rate = Rate::new(nearest_whole_rate(measured_fps), bit(reg, 10) == 1);
         Some(LtcFrame {
-            hours,
-            minutes,
-            seconds,
-            frames,
-            drop_frame: bit(reg, 10) == 1,
+            timecode: Timecode::new(hours, minutes, seconds, frames, rate),
             color_frame: bit(reg, 11) == 1,
             user_bits,
         })
@@ -79,14 +85,25 @@ impl LtcFrame {
 
 impl std::fmt::Display for LtcFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Drop-frame timecode is conventionally written with a semicolon.
-        let sep = if self.drop_frame { ';' } else { ':' };
-        write!(
-            f,
-            "{:02}:{:02}:{:02}{}{:02}",
-            self.hours, self.minutes, self.seconds, sep, self.frames
-        )
+        self.timecode.fmt(f)
     }
+}
+
+/// `measured_fps` snapped to the nearest whole rate LTC is actually run at.
+///
+/// Note that 23.976 and 29.97 differ from 24 and 30 by only 0.1%, which is finer
+/// than the bit-period estimate resolves; the drop-frame flag is the only
+/// reliable hint, and only for 29.97. So this snaps to the whole rate and lets
+/// [`Rate::exact_fps`] apply the NTSC pulldown when the flag says to.
+fn nearest_whole_rate(measured_fps: f64) -> u8 {
+    [24u8, 25, 30]
+        .into_iter()
+        .min_by(|a, b| {
+            (*a as f64 - measured_fps)
+                .abs()
+                .total_cmp(&(*b as f64 - measured_fps).abs())
+        })
+        .unwrap()
 }
 
 /// Frame bit `i` (0-based, transmission order) out of an 80-bit register whose
@@ -113,25 +130,14 @@ pub struct DecodedFrame {
 }
 
 impl DecodedFrame {
-    /// `measured_fps` snapped to the nearest rate LTC is actually run at.
+    /// The rate this frame's timecode is numbered at, NTSC pulldown included:
+    /// 29.97 where the drop-frame flag is set, the whole rate otherwise.
     ///
-    /// Note that 23.976 and 29.97 differ from 24 and 30 by only 0.1%, which is
-    /// finer than the bit-period estimate resolves; the drop-frame flag is the
-    /// only reliable hint, and only for 29.97.
+    /// This is [`Rate::exact_fps`] on the rate the decoder already inferred; it
+    /// stays here because `decoded.nominal_fps()` reads better at a call site
+    /// than reaching through two structs for it.
     pub fn nominal_fps(&self) -> f64 {
-        let nearest = [24.0f64, 25.0, 30.0]
-            .into_iter()
-            .min_by(|a, b| {
-                (a - self.measured_fps)
-                    .abs()
-                    .total_cmp(&(b - self.measured_fps).abs())
-            })
-            .unwrap();
-        if self.frame.drop_frame && nearest == 30.0 {
-            29.97
-        } else {
-            nearest
-        }
+        self.frame.timecode.rate.exact_fps()
     }
 }
 
@@ -266,11 +272,12 @@ impl LtcDecoder {
             self.synced = true;
             self.bits_since_sync = 0;
         } else if self.bits_since_sync == FRAME_BITS {
-            if let Some(frame) = LtcFrame::from_register(self.reg) {
+            let measured_fps = self.sample_rate / (self.bit_period * FRAME_BITS as f64);
+            if let Some(frame) = LtcFrame::from_register(self.reg, measured_fps) {
                 out.push(DecodedFrame {
                     frame,
                     end_sample: self.samples_seen,
-                    measured_fps: self.sample_rate / (self.bit_period * FRAME_BITS as f64),
+                    measured_fps,
                 });
             }
             self.bits_since_sync = 0;
@@ -304,16 +311,17 @@ mod tests {
     /// Lays out the 80 bits of one frame in transmission order.
     fn frame_bits(f: &LtcFrame) -> [u8; FRAME_BITS] {
         let mut bits = [0u8; FRAME_BITS];
-        put(&mut bits, 0, 4, f.frames % 10);
-        put(&mut bits, 8, 2, f.frames / 10);
-        bits[10] = f.drop_frame as u8;
+        let tc = f.timecode;
+        put(&mut bits, 0, 4, tc.frames % 10);
+        put(&mut bits, 8, 2, tc.frames / 10);
+        bits[10] = tc.rate.drop_frame as u8;
         bits[11] = f.color_frame as u8;
-        put(&mut bits, 16, 4, f.seconds % 10);
-        put(&mut bits, 24, 3, f.seconds / 10);
-        put(&mut bits, 32, 4, f.minutes % 10);
-        put(&mut bits, 40, 3, f.minutes / 10);
-        put(&mut bits, 48, 4, f.hours % 10);
-        put(&mut bits, 56, 2, f.hours / 10);
+        put(&mut bits, 16, 4, tc.seconds % 10);
+        put(&mut bits, 24, 3, tc.seconds / 10);
+        put(&mut bits, 32, 4, tc.minutes % 10);
+        put(&mut bits, 40, 3, tc.minutes / 10);
+        put(&mut bits, 48, 4, tc.hours % 10);
+        put(&mut bits, 56, 2, tc.hours / 10);
         for (group, nibble) in f.user_bits.iter().enumerate() {
             put(&mut bits, 4 + group * 8, 4, *nibble);
         }
@@ -377,36 +385,34 @@ mod tests {
         }
     }
 
-    fn tc(hours: u8, minutes: u8, seconds: u8, frames: u8) -> LtcFrame {
+    fn tc(fps: u8, hours: u8, minutes: u8, seconds: u8, frames: u8) -> LtcFrame {
         LtcFrame {
-            hours,
-            minutes,
-            seconds,
-            frames,
-            drop_frame: false,
+            timecode: Timecode::new(hours, minutes, seconds, frames, Rate::whole(fps)),
             color_frame: false,
             user_bits: [0; 8],
         }
     }
 
-    /// Advances a non-drop-frame timecode by one frame.
-    fn advance(f: &mut LtcFrame, fps: u8) {
-        f.frames += 1;
-        if f.frames < fps {
+    /// Advances a non-drop-frame timecode by one frame, at its own rate.
+    fn advance(f: &mut LtcFrame) {
+        let fps = f.timecode.rate.fps;
+        let t = &mut f.timecode;
+        t.frames += 1;
+        if t.frames < fps {
             return;
         }
-        f.frames = 0;
-        f.seconds += 1;
-        if f.seconds < 60 {
+        t.frames = 0;
+        t.seconds += 1;
+        if t.seconds < 60 {
             return;
         }
-        f.seconds = 0;
-        f.minutes += 1;
-        if f.minutes < 60 {
+        t.seconds = 0;
+        t.minutes += 1;
+        if t.minutes < 60 {
             return;
         }
-        f.minutes = 0;
-        f.hours = (f.hours + 1) % 24;
+        t.minutes = 0;
+        t.hours = (t.hours + 1) % 24;
     }
 
     /// Encodes `count` consecutive frames and returns what the decoder made of
@@ -423,7 +429,7 @@ mod tests {
         for _ in 0..count {
             encoder.push(&current);
             sent.push(current);
-            advance(&mut current, fps.round() as u8);
+            advance(&mut current);
         }
         encoder.finish();
 
@@ -435,7 +441,7 @@ mod tests {
 
     #[test]
     fn decodes_a_run_of_frames_at_30fps() {
-        let (sent, got) = roundtrip(48000.0, 30.0, tc(1, 2, 3, 4), 10);
+        let (sent, got) = roundtrip(48000.0, 30.0, tc(30, 1, 2, 3, 4), 10);
         // The first sync word only establishes alignment, so we lose frame one.
         let decoded: Vec<LtcFrame> = got.iter().map(|d| d.frame).collect();
         assert_eq!(decoded, sent[1..]);
@@ -443,7 +449,7 @@ mod tests {
 
     #[test]
     fn decodes_at_25fps_and_44100hz() {
-        let (sent, got) = roundtrip(44100.0, 25.0, tc(9, 59, 59, 20), 12);
+        let (sent, got) = roundtrip(44100.0, 25.0, tc(25, 9, 59, 59, 20), 12);
         let decoded: Vec<LtcFrame> = got.iter().map(|d| d.frame).collect();
         assert_eq!(decoded, sent[1..]);
         // ...and that run rolls the minute over.
@@ -453,7 +459,7 @@ mod tests {
     #[test]
     fn measures_the_frame_rate() {
         for fps in [24.0, 25.0, 30.0] {
-            let (_, got) = roundtrip(48000.0, fps, tc(0, 0, 0, 0), 12);
+            let (_, got) = roundtrip(48000.0, fps, tc(fps.round() as u8, 0, 0, 0, 0), 12);
             let last = got.last().expect("no frames decoded");
             assert!(
                 (last.measured_fps - fps).abs() < 0.2,
@@ -466,7 +472,7 @@ mod tests {
 
     #[test]
     fn frames_land_one_frame_period_apart() {
-        let (_, got) = roundtrip(48000.0, 30.0, tc(0, 0, 0, 0), 12);
+        let (_, got) = roundtrip(48000.0, 30.0, tc(30, 0, 0, 0, 0), 12);
         let period = 48000.0 / 30.0;
         for pair in got.windows(2) {
             let gap = (pair[1].end_sample - pair[0].end_sample) as f64;
@@ -476,15 +482,17 @@ mod tests {
 
     #[test]
     fn carries_drop_frame_and_user_bits() {
-        let mut start = tc(2, 0, 0, 0);
-        start.drop_frame = true;
+        let mut start = tc(30, 2, 0, 0, 0);
+        start.timecode.rate.drop_frame = true;
         start.user_bits = [1, 2, 3, 4, 0xa, 0xb, 0xc, 0xd];
         let (_, got) = roundtrip(48000.0, 30.0, start, 4);
         let frame = got[0].frame;
-        assert!(frame.drop_frame);
+        assert!(frame.timecode.rate.drop_frame);
         assert_eq!(frame.user_bits_hex(), "1234abcd");
         assert_eq!(frame.to_string(), "02:00:00;01");
-        assert_eq!(got[0].nominal_fps(), 29.97);
+        // 30000/1001 rather than the literal 29.97 this used to hand back; it
+        // still prints as 29.97, which is all the display ever wanted.
+        assert!((got[0].nominal_fps() - 29.97).abs() < 0.001);
     }
 
     #[test]
@@ -492,10 +500,10 @@ mod tests {
         // Biphase mark carries no absolute polarity, so a swapped tip/ring or
         // an inverting preamp must not matter.
         let mut encoder = Encoder::new(48000.0, 30.0, 0.5);
-        let mut current = tc(4, 5, 6, 7);
+        let mut current = tc(30, 4, 5, 6, 7);
         for _ in 0..6 {
             encoder.push(&current);
-            advance(&mut current, 30);
+            advance(&mut current);
         }
         encoder.finish();
         let inverted: Vec<f32> = encoder.out.iter().map(|s| -s).collect();
@@ -509,20 +517,20 @@ mod tests {
     #[test]
     fn recovers_after_a_dropout() {
         let mut encoder = Encoder::new(48000.0, 30.0, 0.5);
-        let mut current = tc(0, 10, 0, 0);
+        let mut current = tc(30, 0, 10, 0, 0);
         for _ in 0..4 {
             encoder.push(&current);
-            advance(&mut current, 30);
+            advance(&mut current);
         }
         encoder.finish();
         let mut audio = encoder.out.clone();
         audio.extend(std::iter::repeat_n(0.0, 24000)); // half a second of nothing
 
         let mut encoder = Encoder::new(48000.0, 30.0, 0.5);
-        let mut current = tc(0, 20, 0, 0);
+        let mut current = tc(30, 0, 20, 0, 0);
         for _ in 0..4 {
             encoder.push(&current);
-            advance(&mut current, 30);
+            advance(&mut current);
         }
         encoder.finish();
         audio.extend(encoder.out);
@@ -565,10 +573,10 @@ mod tests {
     #[test]
     fn splitting_the_audio_into_chunks_changes_nothing() {
         let mut encoder = Encoder::new(48000.0, 30.0, 0.5);
-        let mut current = tc(7, 7, 7, 7);
+        let mut current = tc(30, 7, 7, 7, 7);
         for _ in 0..8 {
             encoder.push(&current);
-            advance(&mut current, 30);
+            advance(&mut current);
         }
         encoder.finish();
 

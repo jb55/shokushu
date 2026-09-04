@@ -121,6 +121,9 @@
 //! connection.
 
 use std::fmt;
+use std::time::Duration;
+
+use crate::timecode::{Rate, Timecode};
 
 /// The 16-bit service UUID the Tentacle advertises under.
 pub const SERVICE_UUID_16: u16 = 0xFDAC;
@@ -139,99 +142,6 @@ pub const HEADER: usize = 2;
 /// observed — including across a firmware or configuration change that moved
 /// the flags byte. See the module docs for why this isn't read off the wire.
 const DATA_LEN: usize = 5;
-
-/// Timecode as the Tentacle broadcasts it.
-///
-/// There's no drop-frame flag in here, unlike an LTC frame: only the whole frame
-/// rate is transmitted, so 29.97 and 30 look alike over the air.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Timecode {
-    pub fps: u8,
-    pub hours: u8,
-    pub minutes: u8,
-    pub seconds: u8,
-    pub frames: u8,
-    /// How far into the current frame this reading was taken, in microseconds.
-    /// See [`Timecode::subframe_seconds`], and the caveats in the module docs:
-    /// there's a fixed bias of a few milliseconds in here.
-    pub subframe_micros: u16,
-}
-
-impl Timecode {
-    /// How far into the current frame this reading was taken, in seconds.
-    ///
-    /// Advertisements arrive only a couple of times a second, so this is what
-    /// makes it possible to place a reading on a timeline to better than a
-    /// millisecond rather than to the frame it names.
-    pub fn subframe_seconds(&self) -> f64 {
-        self.subframe_micros as f64 / 1e6
-    }
-
-    /// The same, as a fraction of a frame.
-    ///
-    /// Usually 0.0 to just under 1.0, but a raw reading can exceed 1.0 by the
-    /// fixed bias the module docs describe. Interpolated timecode, which is
-    /// built from a position rather than received, always sits inside a frame.
-    pub fn subframe_fraction(&self) -> f64 {
-        self.subframe_seconds() * self.fps as f64
-    }
-
-    /// Where this reading sits on a timeline of frames since midnight, the
-    /// sub-frame fraction included.
-    ///
-    /// This is the form to do arithmetic in: extrapolating a reading forward, or
-    /// comparing two of them, is addition here and a mess of carries otherwise.
-    pub fn frame_position(&self) -> f64 {
-        let whole = ((self.hours as u64 * 60 + self.minutes as u64) * 60 + self.seconds as u64)
-            * self.fps as u64
-            + self.frames as u64;
-        whole as f64 + self.subframe_fraction()
-    }
-
-    /// The timecode at a position on that timeline, wrapping at 24 hours.
-    ///
-    /// The fractional part of `position` becomes the sub-frame field, so this
-    /// round-trips [`Timecode::frame_position`] to within a microsecond.
-    pub fn at_frame_position(position: f64, fps: u8) -> Timecode {
-        let position = position.rem_euclid(frames_per_day(fps));
-        let whole = position.floor();
-        // A zero rate can't come out of [`parse`], but this is a public
-        // constructor, so keep the division defined.
-        let rate = fps.max(1) as u64;
-        let mut count = whole as u64;
-        let frames = (count % rate) as u8;
-        count /= rate;
-        let seconds = (count % 60) as u8;
-        count /= 60;
-        let minutes = (count % 60) as u8;
-        let hours = (count / 60 % 24) as u8;
-        Timecode {
-            fps,
-            hours,
-            minutes,
-            seconds,
-            frames,
-            // Saturating, so a fraction of exactly 1.0 can't wrap to 0.
-            subframe_micros: ((position - whole) * 1e6 / fps.max(1) as f64) as u16,
-        }
-    }
-}
-
-/// How many frames a 24-hour day holds at this rate, which is where timecode
-/// wraps round to zero. A zero rate is floored at one, as above.
-pub fn frames_per_day(fps: u8) -> f64 {
-    24.0 * 3600.0 * fps.max(1) as f64
-}
-
-impl fmt::Display for Timecode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:02}:{:02}:{:02}:{:02}",
-            self.hours, self.minutes, self.seconds, self.frames
-        )
-    }
-}
 
 /// The date the Tentacle is set to, which it also writes into the LTC user bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,12 +195,14 @@ pub fn parse(data: &[u8]) -> Option<Advert> {
                 return None;
             }
             Some(Advert::Timecode(Timecode {
-                fps,
                 hours,
                 minutes,
                 seconds,
                 frames,
-                subframe_micros,
+                // No drop-frame flag exists on the air; see the timecode module
+                // docs for why that's "unknown" rather than "not drop-frame".
+                rate: Rate::whole(fps),
+                subframe: Duration::from_micros(subframe_micros as u64),
             }))
         }
         KIND_DATE => {
@@ -394,7 +306,7 @@ mod tests {
                 panic!("{payload:02x?} did not parse as timecode");
             };
             assert_eq!(tc.to_string(), *expected);
-            assert_eq!(tc.fps, 25);
+            assert_eq!(tc.rate.fps, 25);
         }
     }
 
@@ -410,7 +322,7 @@ mod tests {
                 panic!("byte 1 = {flags:#04x} was rejected");
             };
             assert_eq!(tc.to_string(), "11:37:40:21");
-            assert_eq!(tc.subframe_micros, 24518);
+            assert_eq!(tc.subframe.as_micros(), 24518);
         }
     }
 
@@ -457,7 +369,7 @@ mod tests {
         let Some(Advert::Timecode(tc)) = parse(&payload) else {
             panic!("did not parse");
         };
-        assert_eq!(tc.subframe_micros, 22626);
+        assert_eq!(tc.subframe.as_micros(), 22626);
         assert!((tc.subframe_seconds() - 0.022626).abs() < 1e-9);
         // 22626 µs of a 40 ms frame.
         assert!((tc.subframe_fraction() - 0.5657).abs() < 0.001);
@@ -471,7 +383,7 @@ mod tests {
         let Some(Advert::Timecode(tc)) = parse(&payload) else {
             panic!("did not parse");
         };
-        assert_eq!(tc.subframe_micros, 0);
+        assert_eq!(tc.subframe, Duration::ZERO);
         assert_eq!(tc.to_string(), "09:35:59:20");
     }
 
@@ -484,64 +396,6 @@ mod tests {
             panic!("rejected a real payload");
         };
         assert_eq!(tc.seconds, 59);
-    }
-
-    #[test]
-    fn frame_positions_round_trip() {
-        // Every field has to survive the trip through a single f64, sub-frame
-        // microseconds included, since that position is what gets extrapolated.
-        let cases = [
-            (25, 0, 0, 0, 0, 0u16),
-            (25, 9, 35, 59, 20, 22626),
-            (30, 23, 59, 59, 29, 33_000),
-            (24, 12, 0, 0, 12, 41_666),
-        ];
-        for (fps, hours, minutes, seconds, frames, subframe_micros) in cases {
-            let tc = Timecode { fps, hours, minutes, seconds, frames, subframe_micros };
-            let back = Timecode::at_frame_position(tc.frame_position(), fps);
-            assert_eq!(back.to_string(), tc.to_string());
-            assert!(
-                back.subframe_micros.abs_diff(subframe_micros) <= 1,
-                "{tc}: {subframe_micros} µs became {} µs",
-                back.subframe_micros
-            );
-        }
-    }
-
-    #[test]
-    fn a_biased_subframe_still_round_trips_as_a_position() {
-        // Sub-frame values run a few milliseconds past a frame period — see the
-        // module docs — so a raw reading can sit outside the frame it names. The
-        // position is what has to survive; the frame number carries.
-        let tc = Timecode {
-            fps: 25,
-            hours: 9,
-            minutes: 35,
-            seconds: 59,
-            frames: 20,
-            subframe_micros: 43_581,
-        };
-        assert!(tc.subframe_fraction() > 1.0);
-        let position = tc.frame_position();
-        let back = Timecode::at_frame_position(position, 25);
-        assert_eq!(back.to_string(), "09:35:59:21");
-        assert!((back.frame_position() - position).abs() < 1e-3);
-    }
-
-    #[test]
-    fn a_frame_position_wraps_at_midnight() {
-        // A free-running clock counts past the end of the day; the display has
-        // to come back round to zero rather than showing hour 24.
-        let midnight = frames_per_day(25);
-        let tc = Timecode::at_frame_position(midnight + 3.5, 25);
-        assert_eq!(tc.to_string(), "00:00:00:03");
-        assert!((tc.subframe_fraction() - 0.5).abs() < 0.001);
-        // And a position from before it, which is what a reading arriving late
-        // across the boundary looks like once unwrapped.
-        assert_eq!(
-            Timecode::at_frame_position(-1.0, 25).to_string(),
-            "23:59:59:24"
-        );
     }
 
     #[test]

@@ -27,7 +27,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::ble::{frames_per_day, Timecode};
+use crate::timecode::{Rate, Timecode};
 
 /// How much of a new anchor's error is taken out on arrival. The remainder is
 /// left to the anchors after it, so jitter averages out instead of being chased.
@@ -99,18 +99,18 @@ impl FreeRun {
     /// the host time it represents.
     pub fn anchor(&mut self, tc: &Timecode, at: Instant) {
         let Some(state) = &mut self.state else {
-            self.state = Some(State::new(tc, tc.frame_position(), at, tc.fps as f64));
+            self.state = Some(State::new(tc, tc.frame_position(), at, tc.rate.fps as f64));
             return;
         };
-        if state.fps != tc.fps {
+        if state.frame_rate != tc.rate {
             // Another rate means another device, or one that's been
             // reconfigured; nothing learned so far still applies.
-            self.state = Some(State::new(tc, tc.frame_position(), at, tc.fps as f64));
+            self.state = Some(State::new(tc, tc.frame_position(), at, tc.rate.fps as f64));
             return;
         }
 
         let predicted = state.extrapolate(at);
-        let position = unwrap_day(tc.frame_position(), predicted, tc.fps);
+        let position = unwrap_day(tc.frame_position(), predicted, tc.rate);
         let error = position - predicted;
 
         // Coming back from a dropout, the model has been sitting still while the
@@ -150,7 +150,8 @@ impl FreeRun {
         let position = state.extrapolate(now).max(state.last_out);
         state.last_out = position;
         Some(Reading::Running(Timecode::at_frame_position(
-            position, state.fps,
+            position,
+            state.frame_rate,
         )))
     }
 
@@ -162,7 +163,10 @@ impl FreeRun {
 
 #[derive(Debug)]
 struct State {
-    fps: u8,
+    /// The rate the device is running at, as it named it. Distinct from
+    /// `rate` below, which is how fast it turns out to be running in host
+    /// seconds.
+    frame_rate: Rate,
     /// The model of the device's timeline: `pos` frames at `at`, advancing at
     /// `rate` frames per second of host time.
     pos: f64,
@@ -180,7 +184,7 @@ struct State {
 impl State {
     fn new(tc: &Timecode, position: f64, at: Instant, rate: f64) -> Self {
         State {
-            fps: tc.fps,
+            frame_rate: tc.rate,
             pos: position,
             at,
             rate,
@@ -204,7 +208,7 @@ impl State {
         if span < RATE_BASELINE.as_secs_f64() {
             return;
         }
-        let nominal = self.fps as f64;
+        let nominal = self.frame_rate.fps as f64;
         let measured = ((position - from_position) / span).clamp(
             nominal * (1.0 - MAX_RATE_ERROR),
             nominal * (1.0 + MAX_RATE_ERROR),
@@ -220,8 +224,8 @@ impl State {
 /// shifting a reading by whole days to land nearest the prediction is what keeps
 /// the two comparable. The extra days come back off in
 /// [`Timecode::at_frame_position`], which is modulo a day anyway.
-fn unwrap_day(position: f64, predicted: f64, fps: u8) -> f64 {
-    let day = frames_per_day(fps);
+fn unwrap_day(position: f64, predicted: f64, rate: Rate) -> f64 {
+    let day = rate.frames_per_day();
     position + ((predicted - position) / day).round() * day
 }
 
@@ -242,10 +246,14 @@ mod tests {
     use super::*;
 
     const FPS: u8 = 25;
+    const RATE: Rate = Rate {
+        fps: FPS,
+        drop_frame: false,
+    };
     const FRAME: f64 = 1.0 / FPS as f64;
 
     fn at(seconds: f64) -> Timecode {
-        Timecode::at_frame_position(seconds * FPS as f64, FPS)
+        Timecode::at_frame_position(seconds * FPS as f64, RATE)
     }
 
     /// The clock's position, in seconds since midnight on the device's timeline.
@@ -452,7 +460,7 @@ mod tests {
     fn keeps_running_over_midnight() {
         // Adverts either side of 00:00:00:00, where the position the arithmetic
         // works in wraps back to zero.
-        let day = frames_per_day(FPS) / FPS as f64;
+        let day = RATE.frames_per_day() / FPS as f64;
         let t0 = Instant::now();
         let mut clock = FreeRun::default();
         clock.anchor(&at(day - 0.6), t0);
@@ -478,12 +486,12 @@ mod tests {
         let mut clock = FreeRun::default();
         clock.anchor(&at(10.0), t0);
 
-        let thirty = Timecode::at_frame_position(10.0 * 30.0, 30);
+        let thirty = Timecode::at_frame_position(10.0 * 30.0, Rate::whole(30));
         clock.anchor(&thirty, t0 + millis(500));
         let Some(Reading::Running(tc)) = clock.sample(t0 + millis(500)) else {
             panic!("lost the clock");
         };
-        assert_eq!(tc.fps, 30);
+        assert_eq!(tc.rate.fps, 30);
         assert_eq!(tc.to_string(), "00:00:10:00");
     }
 
