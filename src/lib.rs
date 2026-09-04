@@ -6,8 +6,8 @@
 //! sources decode into the one [`Timecode`], though they can't tell you quite
 //! the same things about it — see the [`timecode`] module.
 //!
-//! [`ble::Scanner`] is the way in if you have a Tentacle and want the time off
-//! it; its module docs have the two ways to read one.
+//! [`ble`]'s `Scanner` is the way in if you have a Tentacle and want the time
+//! off it; that module's docs have the two ways to read one.
 //!
 //! *shokushu* (触手) is Japanese for tentacle. This is an unofficial,
 //! unaffiliated project: Tentacle Sync GmbH neither endorses nor supports it,
@@ -23,7 +23,7 @@
 //! Getting hold of the bytes is what costs something, and that's what the
 //! features gate:
 //!
-//! - `scan` brings in `btleplug` and a tokio runtime for [`ble::Scanner`].
+//! - `scan` brings in `btleplug` and a tokio runtime for [`ble`]'s `Scanner`.
 //! - `audio` brings in `cpal`, for the `shokushu` binary. There's no library
 //!   audio transport yet.
 //! - `cli` is what the binaries need to be binaries.

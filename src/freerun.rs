@@ -1,4 +1,4 @@
-//! Turning the Bluetooth timecode into something that looks like a clock.
+//! Turning sparse timecode readings into something that looks like a clock.
 //!
 //! Advertisements arrive only one or two times a second, so a display redrawn
 //! when a packet lands visibly jumps. [`FreeRun`] keeps a local clock instead:
@@ -9,6 +9,90 @@
 //! This is cosmetic. Interpolation makes the display smooth, not more accurate:
 //! it adds no information the advertisements didn't carry, and it can't tell you
 //! anything the anchors either side of it didn't.
+//!
+//! # Using it
+//!
+//! Two calls, driven by two different clocks — which is the whole point, and
+//! the thing to get right:
+//!
+//! - [`FreeRun::anchor`] every time a reading arrives, paired with the host
+//!   time it arrived at. You don't control when this happens.
+//! - [`FreeRun::sample`] whenever you want to know what to show. You do control
+//!   when this happens, and it needn't have anything to do with the first.
+//!
+//! ```
+//! use std::time::{Duration, Instant};
+//!
+//! use shokushu::freerun::{FreeRun, Reading};
+//! use shokushu::{Rate, Timecode};
+//!
+//! let mut clock = FreeRun::default();
+//!
+//! // Nothing has arrived yet, so there is nothing to show. Not an error — a
+//! // scan sees plenty of devices that never send timecode at all.
+//! assert!(clock.sample(Instant::now()).is_none());
+//!
+//! // One advertisement lands: 10:00:00:00 at 25 fps.
+//! let arrived = Instant::now();
+//! clock.anchor(&Timecode::new(10, 0, 0, 0, Rate::whole(25)), arrived);
+//!
+//! // Half a second on, the clock has walked twelve frames by itself. No second
+//! // advertisement was needed, which is the difference between a display that
+//! // ticks and one that lurches twice a second.
+//! let Some(Reading::Running(tc)) = clock.sample(arrived + Duration::from_millis(500)) else {
+//!     panic!("anchored, so it runs");
+//! };
+//! assert_eq!((tc.hours, tc.minutes, tc.seconds, tc.frames), (10, 0, 0, 12));
+//!
+//! // Nothing more arrives. Past `HOLDOVER` it stops rather than inventing
+//! // timecode, and hands back the last reading it actually got.
+//! let Some(Reading::Lost { last, since }) = clock.sample(arrived + Duration::from_secs(6)) else {
+//!     panic!("past HOLDOVER");
+//! };
+//! assert_eq!(last, Timecode::new(10, 0, 0, 0, Rate::whole(25)));
+//! assert!(since >= Duration::from_secs(6));
+//! ```
+//!
+//! The scanner in [`ble`](crate::ble) does the anchoring for you — each
+//! `Device` there owns one of these, and `Device::reading` is its `sample`.
+//! Reach for `FreeRun` directly when the readings come from somewhere else, or
+//! when you're driving the scan yourself.
+//!
+//! ## Getting it right
+//!
+//! **One clock per device.** Anchoring one `FreeRun` from two boxes doesn't
+//! average them, it fights: each anchor drags the model onto a different
+//! timeline, and two boxes more than half a second apart make every anchor a
+//! snap to whichever spoke last. Two at different frame rates is worse still —
+//! a rate change throws the model away and starts again. Key them by device,
+//! the way the [`ble`](crate::ble) scanner does.
+//!
+//! **`at` is when the packet arrived, not when you got round to it.** The whole
+//! scheme rests on pairing a reading with the host time it represents, so stamp
+//! [`Instant::now`] the moment the packet comes off the wire — before any
+//! `await`, lookup or lock that could sit between the two. An anchor is only as
+//! good as its timestamp.
+//!
+//! **Sample at your refresh rate.** That's what this exists for. Sampling
+//! faster than the frame rate isn't wrong, it just returns the same frame
+//! number with a finer sub-frame offset, which nothing displaying frames can
+//! show. Sampling much slower than the frame rate means dropping frames you
+//! could have drawn.
+//!
+//! **Non-decreasing `now`.** [`FreeRun::sample`] never hands out a position
+//! below the last one it gave — that's what keeps the slew loop from showing as
+//! a display ticking backwards. A `now` earlier than the previous call is
+//! clamped to that previous reading rather than rewinding, so sampling from two
+//! places without ordering them gets you a stalled clock, not a wrong one.
+//!
+//! **Non-drop-frame rates only.** [`Timecode::frame_position`], which all of
+//! this is arithmetic on, doesn't implement drop-frame numbering and
+//! debug-asserts on it. Bluetooth never sets the flag so nothing in this crate
+//! reaches it, but a reading from elsewhere can: check
+//! [`Rate::drop_frame`](crate::Rate#structfield.drop_frame) before anchoring
+//! one.
+//!
+//! # How it works
 //!
 //! Three things make it more than `anchor + elapsed`:
 //!
@@ -76,17 +160,51 @@ const RATE_GAIN: f64 = 0.25;
 const MAX_RATE_ERROR: f64 = 500e-6;
 
 /// What the smoothed clock says.
+///
+/// The two variants are the two states worth drawing differently: a clock
+/// that's keeping time, and one that has stopped and is telling you so. There
+/// is no third state for "running but stale" — that's what the whole of
+/// [`HOLDOVER`] is, and it's indistinguishable from healthy bursty reception.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reading {
     /// Free-running from a recent advertisement. The sub-frame position is
     /// interpolated, so this advances every time it's asked for.
+    ///
+    /// Consecutive samples inside one frame differ only in
+    /// [`Timecode::subframe`], so anything displaying whole frames will draw
+    /// the same line several times over. That's the intended shape: sample at
+    /// your refresh rate and let the frame number change when it changes.
     Running(Timecode),
+
     /// Nothing has arrived for longer than [`HOLDOVER`], so extrapolation has
     /// stopped. This is the last timecode actually received, and how long ago.
+    ///
+    /// `last` is a real reading, not an extrapolated one — it's the frame the
+    /// device actually sent, so it's safe to show as the last known good
+    /// position. It stays put while `since` grows, and a display wanting to say
+    /// "no signal for 6.1s" has both halves here.
+    ///
+    /// This state is sticky until something arrives: a device switched off and
+    /// a device that's merely quiet look identical, so nothing here decides
+    /// which it was.
     Lost { last: Timecode, since: Duration },
 }
 
 /// A local clock anchored to the Tentacle's advertisements.
+///
+/// Start one with [`Default`], feed it [`anchor`](FreeRun::anchor) as readings
+/// arrive, and ask it [`sample`](FreeRun::sample) whenever you want to know
+/// what to show. See the [module docs](self#using-it) for the shape of that
+/// loop and the things worth getting right.
+///
+/// **One per device.** The clock models a single timeline; anchoring it from
+/// two boxes doesn't average them, it makes each anchor a discontinuity to the
+/// other. The scanner in [`ble`](crate::ble) keys one of these per
+/// peripheral, which is the arrangement to copy.
+///
+/// A fresh one holds no state at all and [`sample`](FreeRun::sample) answers
+/// `None`, so it costs nothing to make one per peripheral in range and find
+/// out later which of them were Tentacles.
 #[derive(Debug, Default)]
 pub struct FreeRun {
     state: Option<State>,
@@ -97,7 +215,36 @@ impl FreeRun {
     ///
     /// `at` wants to be when the packet arrived rather than whenever it's
     /// convenient to call this: the whole scheme rests on pairing a reading with
-    /// the host time it represents.
+    /// the host time it represents. Stamp [`Instant::now`] as the packet comes
+    /// off the wire, before any await or lookup, and pass that.
+    ///
+    /// Call it for every reading. There's no need to filter or rate-limit —
+    /// jitter averaging is the reason it wants them all, and a duplicate
+    /// advertisement is just an anchor with nothing to correct.
+    ///
+    /// # What an anchor does
+    ///
+    /// Usually half of one anchor's error, and deliberately only half: the rest
+    /// is left to the anchors after it, so jitter averages out instead of being
+    /// chased. Four cases aren't ordinary, and all four are decided here rather
+    /// than by the caller:
+    ///
+    /// - **The first one** starts the clock, at the nominal frame rate.
+    /// - **A different [`Rate`]** means another device or a reconfigured one,
+    ///   so nothing learned so far applies and the model starts again. This is
+    ///   why one clock per device is the rule rather than a suggestion.
+    /// - **An error past half a second** is the timecode being changed on the
+    ///   device, or a jam-sync — something real rather than jitter — so the
+    ///   clock snaps to it instead of spending a minute slewing there.
+    /// - **The first anchor after a silence** past [`HOLDOVER`] reseats the
+    ///   clock on the new reading while keeping the measured rate, since the
+    ///   crystals didn't change while the signal was gone. A device coming back
+    ///   resumes cleanly rather than slewing across however long it was away.
+    ///
+    /// Nothing here reports which case it took. If you need to know that a
+    /// device went quiet, watch for [`Reading::Lost`] from
+    /// [`sample`](FreeRun::sample), or let the [`ble`](crate::ble) scanner's
+    /// `Event::Lost` tell you.
     pub fn anchor(&mut self, tc: &Timecode, at: Instant) {
         let Some(state) = &mut self.state else {
             self.state = Some(State::new(tc, tc.frame_position(), at, tc.rate.fps as f64));
@@ -133,6 +280,27 @@ impl FreeRun {
     }
 
     /// What to show now. `None` until the first advertisement has landed.
+    ///
+    /// Call this at whatever rate you're drawing at — that's the point of the
+    /// module. It does no I/O and holds no lock, so it's cheap enough to call
+    /// per frame.
+    ///
+    /// `None` means this has never been anchored, which for a scan is how a
+    /// peripheral that isn't a Tentacle answers: most things in the room never
+    /// send timecode. It is not an error and it isn't the same as
+    /// [`Reading::Lost`], which is a device that *was* sending and stopped.
+    ///
+    /// Takes `&mut self` because sampling advances the clock's own floor: it
+    /// never hands out a position below the last one it gave, which is what
+    /// keeps a mid-slew correction from reaching a display as a timecode that
+    /// ticks backwards. Two consequences worth knowing:
+    ///
+    /// - `now` should not go backwards between calls. An earlier `now` is
+    ///   clamped to the previous reading rather than rewinding, so an unordered
+    ///   pair of callers gets a stalled clock instead of a wrong one.
+    /// - The clock can stall for as long as a correction takes — never more
+    ///   than a frame — and that stall is the intended behaviour, not a
+    ///   dropped sample.
     pub fn sample(&mut self, now: Instant) -> Option<Reading> {
         let state = self.state.as_mut()?;
 
@@ -157,6 +325,14 @@ impl FreeRun {
     }
 
     /// The last advertisement actually received, whatever the clock is doing.
+    ///
+    /// This is the un-smoothed truth: the frame the device sent, with its own
+    /// sub-frame field, not extrapolated or slewed. Use it when you want what
+    /// arrived rather than what to show — logging, or checking the clock
+    /// against its input. [`sample`](FreeRun::sample) is what a display wants.
+    ///
+    /// Unlike `sample` this takes `&self` and never advances anything, so it's
+    /// safe to read as often as you like.
     pub fn last_received(&self) -> Option<Timecode> {
         self.state.as_ref().map(|s| s.last)
     }
