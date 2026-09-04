@@ -504,7 +504,7 @@ footer {
       Nothing here comes from a published specification.
     </p>
     <div class="masthead-meta">
-      <span><b>Corpus</b> 338 unique BLE payloads, ~275 s of capture</span>
+      <span><b>Corpus</b> 338 unique payloads, 5 captures, 2 implementations</span>
       <span><b>Device</b> 25 fps, firmware unknown</span>
       <span><b>Method</b> observation against known timecode</span>
     </div>
@@ -554,7 +554,7 @@ footer {
             <tbody>
               <tr>
                 <td><b>BLE advertisements</b></td>
-                <td class="m">~1.8 / s</td>
+                <td class="m">~1.4–1.8 / s</td>
                 <td>&lt;1 ms per packet</td>
                 <td>Always on, no pairing</td>
               </tr>
@@ -611,6 +611,53 @@ footer {
           The advertised name is whatever the owner called the device. Ours was
           “Ricki”. Discovery has to key on service UUID <code>0xFDAC</code>, not
           on a name — a scanner looking for “Tentacle” finds nothing.
+        </p>
+      </div>
+
+      <h3>Reception characteristics</h3>
+      <p>
+        Two things about how packets actually arrive, both of which bite an
+        implementer who assumes a steady stream.
+      </p>
+
+      <div class="evidence">
+        <div class="claim">Every reading arrives twice <span class="badge b-measured">Measured</span></div>
+        <p>
+          Of 75 distinct readings in a 45 s capture, <b>72 were delivered as
+          byte-identical pairs 0–1 ms apart</b>; only 3 arrived singly. Raw
+          advertisement rate 3.41/s, fresh-reading rate 1.74/s.
+        </p>
+        <p>
+          This is not a Tentacle quirk — it is ordinary BLE. One advertising
+          event retransmits the same PDU on each of the three primary
+          advertising channels, and a scanner that catches more than one copy
+          reports it more than once. <b>De-duplicate on payload equality</b>, or
+          your apparent rate is double the real one.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Reception is bursty <span class="badge b-measured">Measured</span></div>
+        <p>
+          Gaps between <em>fresh</em> readings, three captures with the device on
+          a desk at −46 dBm:
+        </p>
+        <div class="scroll-x" style="margin:14px 0">
+          <table style="min-width:520px">
+            <thead><tr><th>Capture</th><th class="num">Fresh/s</th><th class="num">p50</th><th class="num">p90</th><th class="num">max</th><th class="num">Gaps &gt;1 s</th></tr></thead>
+            <tbody>
+              <tr><td>A (n=71)</td><td class="num">1.80</td><td class="num">320 ms</td><td class="num">1481 ms</td><td class="num">2206 ms</td><td class="num">14%</td></tr>
+              <tr><td>B (n=113)</td><td class="num">1.63</td><td class="num">519 ms</td><td class="num">1169 ms</td><td class="num">1887 ms</td><td class="num">21%</td></tr>
+              <tr><td>C (n=55, independent)</td><td class="num">1.38</td><td class="num">320 ms</td><td class="num">1480 ms</td><td class="num">2110 ms</td><td class="num">~25%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Half the gaps sit around a third of a second, but a fifth to a quarter
+          exceed a full second and the worst run past two. <b>A signal-loss
+          timeout under about 3 s will fire during normal reception</b>; 5 s is a
+          safer holdover. Line of sight and a strong RSSI do not fix this — those
+          figures are near-ideal conditions.
         </p>
       </div>
 
@@ -750,16 +797,17 @@ footer {
         <div class="claim">It is microseconds, at roughly 1 MHz <span class="badge b-measured">Measured</span></div>
         <p>
           Timing identifies it. Compare each packet's timecode against the host
-          clock when it arrived, and see which interpretation tracks best. Two
-          independent captures, trained and validated separately:
+          clock when it arrived, and see which interpretation tracks best. Three
+          independent captures — A and B trained and validated separately, C
+          collected afterwards by a second implementation that had not seen them:
         </p>
         <div class="scroll-x" style="margin:14px 0">
-          <table style="min-width:460px">
-            <thead><tr><th>Interpretation</th><th class="num">Capture A (n=71)</th><th class="num">Capture B (n=113)</th></tr></thead>
+          <table style="min-width:480px">
+            <thead><tr><th>Interpretation</th><th class="num">A (n=71)</th><th class="num">B (n=113)</th><th class="num">C (n=112)</th></tr></thead>
             <tbody>
-              <tr><td>Ignore the trailer</td><td class="num">8.0 ms</td><td class="num">9.0 ms</td></tr>
-              <tr><td>Fraction of a frame, ÷65536</td><td class="num">3.1 ms</td><td class="num">3.5 ms</td></tr>
-              <tr><td><b>Microseconds, ÷40000</b></td><td class="num"><b>0.61 ms</b></td><td class="num"><b>0.73 ms</b></td></tr>
+              <tr><td>Ignore the trailer</td><td class="num">8.0 ms</td><td class="num">9.0 ms</td><td class="num">13.5 ms</td></tr>
+              <tr><td>Fraction of a frame, ÷65536</td><td class="num">3.1 ms</td><td class="num">3.5 ms</td><td class="num">4.97 ms</td></tr>
+              <tr><td><b>Microseconds, ÷40000</b></td><td class="num"><b>0.61 ms</b></td><td class="num"><b>0.73 ms</b></td><td class="num"><b>0.61 ms</b></td></tr>
             </tbody>
           </table>
         </div>
@@ -768,19 +816,23 @@ footer {
           is 40 ms.
         </p>
         <p>
-          Ignoring the trailer leaves ~8 ms of error — almost exactly a quarter
+          Ignoring the trailer leaves 8–13 ms of error — on the order of a quarter
           frame, the signature of pure quantisation. Reading it as microseconds
-          collapses that by more than tenfold. Two further checks agree: the
-          observed values span <b>39 896</b>, against 40 000 µs in a frame at
-          25 fps; and free-fitting the scale with no assumptions lands on 39 728
-          and 39 376 in the two captures. A 1 MHz tick, divided into frames.
+          collapses that by more than tenfold, to well under a millisecond, every
+          time. Two further checks agree: free-fitting the scale with no
+          assumptions lands on 39 728, 39 376 and 40 500 across the three
+          captures; and the observed range is the right width for that and
+          nowhere near 65536 — a span of <b>39 896</b> in A and B, <b>39 251</b>
+          in C, against 40 000 µs in a frame at 25 fps. A 1 MHz tick, divided into
+          frames.
         </p>
       </div>
 
       <div class="callout">
-        <div class="hd">A constant ~3.7 ms bias</div>
+        <div class="hd">A constant few-millisecond bias</div>
         <p>
-          Values range <code>3685</code>–<code>43581</code>, not
+          Values range <code>3685</code>–<code>43581</code> in captures A and B,
+          and <code>4056</code>–<code>43307</code> in C — not
           <code>0</code>–<code>39999</code>. The window is the right width but
           offset by about 3.7 ms, so this is not literally “microseconds since
           the frame boundary”. The origin of the offset is unknown — a transmit-path

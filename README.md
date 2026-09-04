@@ -4,6 +4,9 @@ Reads timecode off a Tentacle Sync E, two ways: `tentacle` decodes SMPTE LTC
 from an audio input, and `tentacle-ble` reads it out of the device's Bluetooth
 advertisements without pairing.
 
+The Bluetooth protocol is undocumented by the vendor; what's known about it is
+written up in [PROTOCOL.md](PROTOCOL.md).
+
 ```
 $ tentacle-ble
 adapter state: PoweredOn — scanning until interrupted
@@ -63,31 +66,26 @@ macOS will ask for Bluetooth permission the first time.
 
 ### The advertisement format
 
-None of this is documented; it's what the bytes did when watched against a
-device whose timecode and date were known. `src/ble.rs` has the details and
-`--raw` is how it was worked out. In short: service UUID `0xFDAC`, nine bytes,
-a record type and a length ahead of a five-byte data field.
+Documented in full in [PROTOCOL.md](PROTOCOL.md), with the evidence behind each
+claim and what's still unknown — there's a formatted copy at
+[docs/protocol.html](docs/protocol.html). None of it comes from a published
+spec; `--raw` is how it was worked out. The short version:
 
 ```
 22 05 | 19 09 23 3b 14 | 58 62     fps=25, 09:35:59:20, 22626 µs into the frame
 42 05 | 00 26 09 04 02 | a1 00     2026-09-04
 ```
 
-The trailer on a timecode record is that microsecond counter, big-endian. Three
-captures put the scale at 1 MHz: the values span about 39,900 of the 65,536 a
-full-scale fraction would fill, 40,000 µs is exactly one frame at 25 fps, and
-free-fitting the scale against host arrival times lands within a couple of
-percent of it every time. Reading it as a fraction over 65,536 — which is what
-this originally did — fits five times worse. It carries a fixed bias of a few
-milliseconds, so it isn't literally microseconds since the frame boundary;
-nothing corrects for that, since it cancels between readings.
+Service UUID `0xFDAC`, nine bytes, a record type and a length ahead of a
+five-byte data field, with a big-endian microsecond counter in the trailer.
 
-Timecode is plain binary, not BCD — seconds were seen hitting `0x3b` and rolling
-to `0x00` as the minute advanced. The date is BCD. Worth knowing if you extend
-this: the frame rate arrives as a whole number, so 29.97 and 30 are
-indistinguishable over the air, and no drop-frame flag is broadcast at all. Only
-25 fps has actually been observed, so a device at another rate is the first thing
-to check with `--raw`.
+Three things to know before extending this. **Discovery has to key on the service
+UUID, not on a name** — the advertised name is whatever the owner called the
+device, so a scanner looking for "Tentacle" finds nothing. **Timecode is plain
+binary, not BCD**, which is easy to get backwards because most samples look like
+valid BCD; the date record, inconsistently, *is* BCD. And **the frame rate
+arrives as a whole number**, so 29.97 and 30 are indistinguishable over the air
+and no drop-frame flag is broadcast at all. Only 25 fps has ever been observed.
 
 ## Wiring it to a Mac
 

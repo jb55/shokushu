@@ -15,15 +15,16 @@ Every claim below is marked:
 | **[inferred]** | consistent with the data, not proven |
 | **[unknown]** | no idea |
 
-Corpus: 338 unique BLE payloads over roughly 275 s, from **one** device at **one**
-frame rate (25 fps), on 2026-09-04. That last part is the main limitation of
-everything here.
+Corpus: 338 unique BLE payloads over roughly 275 s, plus a fourth capture for
+reception timing and an independent fifth by a second implementation — all from
+**one** device at **one** frame rate (25 fps), on 2026-09-04. That last part is
+the main limitation of everything here.
 
 ## Three transports
 
 | Transport | Rate | Precision | Availability |
 |---|---|---|---|
-| BLE advertisements | ~1.8/s | <1 ms per packet | Always on, no pairing |
+| BLE advertisements | ~1.4–1.8/s | <1 ms per packet | Always on, no pairing |
 | LTC on audio out | every frame | sample-accurate | Needs a real audio input |
 | USB-C | — | — | Vendor-specific, undocumented |
 
@@ -47,6 +48,34 @@ connection, no GATT read — the timecode is in the advertisement itself.
 **Discovery must key on the service UUID, not on a name.** The advertised name is
 whatever the owner called the device — ours was "Ricki". A scanner looking for
 "Tentacle" finds nothing. [measured]
+
+### Reception characteristics
+
+Two things about how packets actually arrive, both of which will bite an
+implementer who assumes a steady stream.
+
+**Every reading arrives twice.** [measured] Of 75 distinct readings in a 45 s
+capture, 72 were delivered as byte-identical pairs 0–1 ms apart; only 3 arrived
+singly. The raw advertisement rate was 3.41/s and the fresh-reading rate 1.74/s.
+
+This is not a Tentacle quirk — it is ordinary BLE. One advertising event
+retransmits the same PDU on each of the three primary advertising channels, and a
+scanner that catches more than one copy reports it more than once. **De-duplicate
+on payload equality**, or your apparent rate is double the real one.
+
+**Reception is bursty.** [measured] Gaps between *fresh* readings, three captures
+with the device on a desk at −46 dBm:
+
+| Capture | Fresh/s | p50 | p90 | max | Gaps >1 s |
+|---|---|---|---|---|---|
+| A (n=71) | 1.80 | 320 ms | 1481 ms | 2206 ms | 14% |
+| B (n=113) | 1.63 | 519 ms | 1169 ms | 1887 ms | 21% |
+| C (n=55, independent) | 1.38 | 320 ms | 1480 ms | 2110 ms | ~25% |
+
+Half the gaps are around a third of a second, but a fifth to a quarter exceed a
+full second and the worst run past two. **A signal-loss timeout under about 3 s
+will fire during normal reception**; 5 s is a safer holdover. Good line-of-sight
+and a strong RSSI do not fix this — the figures above are near-ideal conditions.
 
 ### Packet anatomy
 
@@ -112,22 +141,29 @@ eliminates every CRC, parity and XOR-style checksum, whatever its parameters.
 
 **It is microseconds, at roughly 1 MHz.** [measured] Timing identifies it.
 Compare each packet's timecode against the host clock when it arrived, and see
-which interpretation tracks best. Median absolute residual, two independent
-captures trained and validated separately (one frame at 25 fps = 40 ms):
+which interpretation tracks best. Median absolute residual across three
+independent captures — A and B trained and validated separately, C collected
+afterwards by a second implementation that had not seen the others (one frame at
+25 fps = 40 ms):
 
-| Interpretation | Capture A (n=71) | Capture B (n=113) |
-|---|---|---|
-| Ignore the trailer | 8.0 ms | 9.0 ms |
-| Fraction of a frame, ÷65536 | 3.1 ms | 3.5 ms |
-| **Microseconds, ÷40000** | **0.61 ms** | **0.73 ms** |
+| Interpretation | A (n=71) | B (n=113) | C (n=112) |
+|---|---|---|---|
+| Ignore the trailer | 8.0 ms | 9.0 ms | 13.5 ms |
+| Fraction of a frame, ÷65536 | 3.1 ms | 3.5 ms | 4.97 ms |
+| **Microseconds, ÷40000** | **0.61 ms** | **0.73 ms** | **0.61 ms** |
 
-Ignoring the trailer leaves ~8 ms of error, almost exactly a quarter frame — the
-signature of pure quantisation. Reading it as microseconds collapses that by more
-than tenfold. Two further checks agree: the observed values span **39,896**
-against 40,000 µs in a frame at 25 fps, and free-fitting the scale with no
-assumptions lands on 39,728 and 39,376 in the two captures.
+Ignoring the trailer leaves 8–13 ms of error, on the order of a quarter frame —
+the signature of pure quantisation. Reading it as microseconds collapses that by
+more than tenfold, to well under a millisecond, every time.
 
-**A constant ~3.7 ms bias.** [unknown] Values range 3685–43581, not 0–39999. The
+Two further checks agree. Free-fitting the scale with no assumptions lands on
+39,728, 39,376 and 40,500 across the three captures — a ~1 MHz tick divided into
+frames. And the observed value range is the right width for that and nowhere near
+65536: span **39,896** in A and B combined, **39,251** in C, against 40,000 µs in
+a frame at 25 fps.
+
+**A constant few-millisecond bias.** [unknown] Values range 3685–43581 in
+captures A and B, and 4056–43307 in C — not 0–39999. The
 window is the right width but offset by about 3.7 ms, so this is not literally
 "microseconds since the frame boundary". The origin is unknown; a transmit-path
 constant is a plausible guess and nothing more. It does not matter for
