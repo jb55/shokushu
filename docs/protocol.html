@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>:root { color-scheme: light dark; } img { max-width: 100%; } [hidden] { display: none !important; }</style>
+<title>Tentacle Sync E Protocol</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+:root {
+  --ground:      #e8ebef;
+  --surface:     #fbfcfd;
+  --surface-sunk:#dfe4ea;
+  --ink:         #10161d;
+  --ink-soft:    #57626f;
+  --ink-faint:   #838f9d;
+  --rule:        #c6ced7;
+  --rule-soft:   #d8dee5;
+
+  --region-head: #4a5563;
+  --region-data: #0b6e6a;
+  --region-tail: #a8480f;
+
+  --measured:    #0b6e6a;
+  --inferred:    #8a6510;
+  --unknown:     #6b7684;
+
+  --accent:      #0b6e6a;
+  --accent-weak: #d7e6e4;
+
+  --shadow: 0 1px 2px rgba(16,22,29,.06), 0 8px 24px -16px rgba(16,22,29,.28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #10151a;
+    --surface:     #181e25;
+    --surface-sunk:#0b1015;
+    --ink:         #e3e8ee;
+    --ink-soft:    #9aa5b2;
+    --ink-faint:   #6d7885;
+    --rule:        #2b333c;
+    --rule-soft:   #232a32;
+
+    --region-head: #94a1b0;
+    --region-data: #4fb3aa;
+    --region-tail: #e08a4d;
+
+    --measured:    #4fb3aa;
+    --inferred:    #d3a63c;
+    --unknown:     #8b96a3;
+
+    --accent:      #4fb3aa;
+    --accent-weak: #14312f;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground:      #10151a;
+  --surface:     #181e25;
+  --surface-sunk:#0b1015;
+  --ink:         #e3e8ee;
+  --ink-soft:    #9aa5b2;
+  --ink-faint:   #6d7885;
+  --rule:        #2b333c;
+  --rule-soft:   #232a32;
+
+  --region-head: #94a1b0;
+  --region-data: #4fb3aa;
+  --region-tail: #e08a4d;
+
+  --measured:    #4fb3aa;
+  --inferred:    #d3a63c;
+  --unknown:     #8b96a3;
+
+  --accent:      #4fb3aa;
+  --accent-weak: #14312f;
+
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, .cond {
+  font-family: "IBM Plex Sans Condensed", "Helvetica Neue", Arial, sans-serif;
+  text-wrap: balance;
+}
+
+code, .mono, pre {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* ---------- shell ---------- */
+
+.shell {
+  max-width: 1220px;
+  margin: 0 auto;
+  padding: 0 28px 96px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0 56px;
+}
+@media (min-width: 1100px) {
+  .shell { grid-template-columns: 210px minmax(0, 1fr); }
+  .toc-col { display: block; }
+}
+
+.col { min-width: 0; max-width: 760px; }
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  grid-column: 1 / -1;
+  border-bottom: 2px solid var(--ink);
+  padding: 56px 0 20px;
+  margin-bottom: 40px;
+}
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11.5px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin: 0 0 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+h1 {
+  font-size: clamp(38px, 6.5vw, 62px);
+  line-height: 1.02;
+  font-weight: 700;
+  letter-spacing: -.018em;
+  margin: 0 0 18px;
+}
+.standfirst {
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  max-width: 62ch;
+  margin: 0 0 26px;
+}
+.masthead-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-size: 13px;
+  color: var(--ink-faint);
+  padding-top: 6px;
+  border-top: 1px solid var(--rule-soft);
+}
+.masthead-meta b { color: var(--ink-soft); font-weight: 600; }
+
+/* ---------- toc ---------- */
+
+.toc-col { display: none; }
+.toc {
+  position: sticky;
+  top: 28px;
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-size: 13.5px;
+  line-height: 1.45;
+  padding-bottom: 40px;
+}
+.toc-title {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 12px;
+}
+.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.toc a { color: var(--ink-soft); text-decoration: none; display: block; }
+.toc a:hover { color: var(--accent); }
+.toc .n {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-right: 8px;
+}
+
+/* ---------- sections ---------- */
+
+section { margin-bottom: 68px; scroll-margin-top: 24px; }
+
+h2 {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -.012em;
+  line-height: 1.15;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+h2 .n {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-faint);
+  letter-spacing: 0;
+}
+.section-rule { height: 1px; background: var(--rule); margin: 0 0 24px; }
+
+h3 {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 38px 0 10px;
+  letter-spacing: -.005em;
+}
+
+p { margin: 0 0 18px; max-width: 68ch; }
+ul, ol.prose { margin: 0 0 18px; padding-left: 22px; max-width: 66ch; }
+li { margin-bottom: 8px; }
+
+code:not(pre code) {
+  font-size: .87em;
+  background: var(--surface-sunk);
+  padding: .1em .36em;
+  border-radius: 3px;
+  color: var(--ink);
+}
+
+/* ---------- panels ---------- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  box-shadow: var(--shadow);
+  margin: 0 0 26px;
+  overflow: hidden;
+}
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--surface-sunk);
+}
+.panel-title {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.panel-body { padding: 20px 18px; }
+.panel-body > :last-child { margin-bottom: 0; }
+
+.scroll-x { overflow-x: auto; }
+
+/* ---------- byte map ---------- */
+
+.bytemap { min-width: 620px; padding: 4px 0 2px; }
+.byterow {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 6px;
+}
+.byte {
+  text-align: center;
+  border-radius: 4px;
+  padding: 9px 2px 8px;
+  border: 1px solid var(--rule);
+  background: var(--ground);
+}
+.byte .idx {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  color: var(--ink-faint);
+  display: block;
+  margin-bottom: 3px;
+}
+.byte .hex {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  display: block;
+}
+.byte.r-head { border-color: var(--region-head); color: var(--region-head); }
+.byte.r-data { border-color: var(--region-data); color: var(--region-data); }
+.byte.r-tail { border-color: var(--region-tail); color: var(--region-tail); }
+.byte.r-head .hex, .byte.r-data .hex, .byte.r-tail .hex { color: inherit; }
+
+.bracketrow {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 6px;
+  margin-top: 7px;
+}
+.bracket {
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-size: 12px;
+  text-align: center;
+  padding-top: 7px;
+  border-top: 2px solid currentColor;
+  line-height: 1.25;
+}
+.bracket small {
+  display: block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  color: var(--ink-faint);
+  margin-top: 2px;
+  letter-spacing: .04em;
+}
+.b-head { color: var(--region-head); }
+.b-data { color: var(--region-data); }
+.b-tail { color: var(--region-tail); }
+
+.decoded {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--rule);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 15px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  align-items: baseline;
+}
+.decoded .big { font-size: 23px; font-weight: 500; letter-spacing: .01em; }
+.decoded .lbl { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); }
+
+/* ---------- tables ---------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14.5px;
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+}
+th {
+  text-align: left;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 500;
+  padding: 0 14px 9px 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+td {
+  padding: 10px 14px 10px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: top;
+  line-height: 1.45;
+}
+tr:last-child td { border-bottom: none; }
+td.m, th.m { font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; text-align: right; padding-right: 20px; }
+th.num { text-align: right; padding-right: 20px; }
+
+/* ---------- confidence badges ---------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  padding: 2px 7px 2px 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  line-height: 1.5;
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.b-measured { color: var(--measured); }
+.b-inferred { color: var(--inferred); }
+.b-unknown  { color: var(--unknown); }
+.b-unknown::before { background: none; box-shadow: inset 0 0 0 1.5px currentColor; border-radius: 50%; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+  font-size: 13.5px;
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  color: var(--ink-soft);
+  margin-bottom: 26px;
+  padding: 13px 16px;
+  background: var(--surface);
+  border: 1px solid var(--rule-soft);
+  border-radius: 5px;
+}
+.legend > div { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- evidence ---------- */
+
+.evidence {
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  padding: 15px 18px;
+  margin: 0 0 22px;
+  border-radius: 0 4px 4px 0;
+}
+.evidence .claim {
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-weight: 600;
+  font-size: 16.5px;
+  margin-bottom: 7px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.evidence p { font-size: 15.5px; margin-bottom: 0; max-width: 64ch; color: var(--ink-soft); }
+.evidence p + p { margin-top: 11px; }
+
+pre {
+  background: var(--surface-sunk);
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.62;
+  overflow-x: auto;
+  margin: 0 0 20px;
+}
+
+.callout {
+  background: var(--accent-weak);
+  border-radius: 5px;
+  padding: 15px 18px;
+  margin: 0 0 22px;
+  font-size: 15.5px;
+}
+.callout p { margin-bottom: 0; max-width: 64ch; }
+.callout p + p { margin-top: 10px; }
+.callout .hd {
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  color: var(--accent);
+}
+
+footer {
+  grid-column: 1 / -1;
+  border-top: 2px solid var(--ink);
+  padding-top: 20px;
+  margin-top: 20px;
+  font-family: "IBM Plex Sans Condensed", sans-serif;
+  font-size: 13.5px;
+  color: var(--ink-faint);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+  justify-content: space-between;
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header class="masthead">
+    <div class="eyebrow">
+      <span>Reverse-engineered</span><span>·</span>
+      <span>Tentacle Sync E Mk2</span><span>·</span>
+      <span>Observed 2026-09-04</span>
+    </div>
+    <h1>Tentacle Sync E Protocol</h1>
+    <p class="standfirst">
+      How to read timecode off a Tentacle Sync E three ways — from its Bluetooth
+      advertisements, from LTC on an audio input, and not at all over USB.
+      Nothing here comes from a published specification.
+    </p>
+    <div class="masthead-meta">
+      <span><b>Corpus</b> 338 unique BLE payloads, ~275 s of capture</span>
+      <span><b>Device</b> 25 fps, firmware unknown</span>
+      <span><b>Method</b> observation against known timecode</span>
+    </div>
+  </header>
+
+  <div class="toc-col">
+    <nav class="toc">
+      <div class="toc-title">Contents</div>
+      <ol>
+        <li><a href="#transports"><span class="n">01</span>Three transports</a></li>
+        <li><a href="#ble"><span class="n">02</span>BLE advertisements</a></li>
+        <li><a href="#timecode"><span class="n">03</span>Timecode record</a></li>
+        <li><a href="#subframe"><span class="n">04</span>The microsecond field</a></li>
+        <li><a href="#date"><span class="n">05</span>Date record</a></li>
+        <li><a href="#mfr"><span class="n">06</span>Manufacturer data</a></li>
+        <li><a href="#ltc"><span class="n">07</span>LTC over audio</a></li>
+        <li><a href="#usb"><span class="n">08</span>USB</a></li>
+        <li><a href="#method"><span class="n">09</span>Method</a></li>
+        <li><a href="#open"><span class="n">10</span>Open questions</a></li>
+      </ol>
+    </nav>
+  </div>
+
+  <main class="col">
+
+    <div class="legend">
+      <strong style="font-weight:600;color:var(--ink)">Every claim is marked:</strong>
+      <div><span class="badge b-measured">Measured</span> directly observed</div>
+      <div><span class="badge b-inferred">Inferred</span> fits the data, not proven</div>
+      <div><span class="badge b-unknown">Unknown</span> no idea</div>
+    </div>
+
+    <section id="transports">
+      <h2><span class="n">01</span> Three transports</h2>
+      <div class="section-rule"></div>
+      <p>
+        The device exposes timecode over Bluetooth and over analogue audio. It
+        also enumerates over USB, but that port carries nothing you can read
+        without reverse-engineering a vendor protocol.
+      </p>
+      <div class="panel">
+        <div class="scroll-x">
+          <table style="min-width:560px">
+            <thead>
+              <tr><th>Transport</th><th>Rate</th><th>Precision</th><th>Availability</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>BLE advertisements</b></td>
+                <td class="m">~1.8 / s</td>
+                <td>&lt;1 ms per packet</td>
+                <td>Always on, no pairing</td>
+              </tr>
+              <tr>
+                <td><b>LTC on audio out</b></td>
+                <td class="m">every frame</td>
+                <td>Sample-accurate</td>
+                <td>Needs a real audio input</td>
+              </tr>
+              <tr>
+                <td><b>USB-C</b></td>
+                <td class="m">—</td>
+                <td>—</td>
+                <td>Vendor-specific, undocumented</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p>
+        The trade is rate against precision. A BLE packet carries a microsecond
+        stamp, so any single reading is excellent — but they arrive under twice a
+        second, so nothing can be clocked from them without interpolation. LTC
+        arrives continuously and is what you want to actually sync to picture.
+      </p>
+    </section>
+
+    <section id="ble">
+      <h2><span class="n">02</span> BLE advertisements</h2>
+      <div class="section-rule"></div>
+      <p>
+        The Sync E broadcasts continuously to anyone listening. There is no
+        pairing, no connection and no GATT read involved — the timecode is in the
+        advertisement itself.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Advertisement envelope</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <table>
+            <tbody>
+              <tr><td style="width:36%"><b>Service UUID</b></td><td class="m">0000fdac-0000-1000-8000-00805f9b34fb</td></tr>
+              <tr><td><b>Short form</b></td><td class="m">0xFDAC</td></tr>
+              <tr><td><b>Service data</b></td><td>9 bytes, always</td></tr>
+              <tr><td><b>Local name</b></td><td>User-set in the Tentacle app — <em>not</em> a fixed string, and it will not contain the word “Tentacle” unless someone typed it</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="callout">
+        <div class="hd">Don't filter on the name</div>
+        <p>
+          The advertised name is whatever the owner called the device. Ours was
+          “Ricki”. Discovery has to key on service UUID <code>0xFDAC</code>, not
+          on a name — a scanner looking for “Tentacle” finds nothing.
+        </p>
+      </div>
+
+      <h3>Packet anatomy</h3>
+      <p>
+        Every payload is nine bytes with the same shape: a record type, a length,
+        a five-byte data field, and a two-byte trailer.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Service data · 0xFDAC</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <div class="scroll-x">
+            <div class="bytemap">
+              <div class="byterow">
+                <div class="byte r-head"><span class="idx">0</span><span class="hex">22</span></div>
+                <div class="byte r-head"><span class="idx">1</span><span class="hex">05</span></div>
+                <div class="byte r-data"><span class="idx">2</span><span class="hex">19</span></div>
+                <div class="byte r-data"><span class="idx">3</span><span class="hex">09</span></div>
+                <div class="byte r-data"><span class="idx">4</span><span class="hex">23</span></div>
+                <div class="byte r-data"><span class="idx">5</span><span class="hex">3b</span></div>
+                <div class="byte r-data"><span class="idx">6</span><span class="hex">14</span></div>
+                <div class="byte r-tail"><span class="idx">7</span><span class="hex">58</span></div>
+                <div class="byte r-tail"><span class="idx">8</span><span class="hex">62</span></div>
+              </div>
+              <div class="bracketrow">
+                <div class="bracket b-head">type<small>0x22</small></div>
+                <div class="bracket b-head">len<small>always 5</small></div>
+                <div class="bracket b-data" style="grid-column: 3 / 8">data field<small>five bytes, meaning set by type</small></div>
+                <div class="bracket b-tail" style="grid-column: 8 / 10">trailer<small>big-endian u16</small></div>
+              </div>
+            </div>
+          </div>
+          <div class="decoded">
+            <span class="lbl">Decodes to</span>
+            <span class="big">09:35:59:20</span>
+            <span>25 fps</span>
+            <span style="color:var(--ink-faint)">+22 626 µs into frame</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Record types</span></div>
+        <div class="panel-body">
+          <table>
+            <thead><tr><th class="m">Byte 0</th><th>Record</th><th class="num">Share of traffic</th></tr></thead>
+            <tbody>
+              <tr><td class="m">0x22</td><td>Timecode</td><td class="num">337 of 348</td></tr>
+              <tr><td class="m">0x42</td><td>Date</td><td class="num">11 of 348</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:14px;font-size:14.5px;color:var(--ink-soft)">
+            Byte 1 was <code>0x05</code> in every packet observed, and every
+            packet was nine bytes. Reading it as a length is an inference that
+            happens to be self-consistent — no packet of another length ever
+            turned up to test it.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="timecode">
+      <h2><span class="n">03</span> Timecode record — <code>0x22</code></h2>
+      <div class="section-rule"></div>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Field layout</span></div>
+        <div class="scroll-x">
+          <table style="min-width:600px">
+            <thead><tr><th class="m">Byte</th><th>Field</th><th>Encoding</th><th>Observed</th><th>Confidence</th></tr></thead>
+            <tbody>
+              <tr><td class="m">2</td><td>Frame rate</td><td>Binary, whole fps</td><td class="m">25 only</td><td><span class="badge b-inferred">Inferred</span></td></tr>
+              <tr><td class="m">3</td><td>Hours</td><td>Binary</td><td class="m">9 only</td><td><span class="badge b-inferred">Inferred</span></td></tr>
+              <tr><td class="m">4</td><td>Minutes</td><td>Binary</td><td class="m">0–59</td><td><span class="badge b-measured">Measured</span></td></tr>
+              <tr><td class="m">5</td><td>Seconds</td><td>Binary</td><td class="m">0–59, all 60</td><td><span class="badge b-measured">Measured</span></td></tr>
+              <tr><td class="m">6</td><td>Frames</td><td>Binary</td><td class="m">0–24, all 25</td><td><span class="badge b-measured">Measured</span></td></tr>
+              <tr><td class="m">7–8</td><td>Microseconds into frame</td><td>Big-endian u16</td><td class="m">3685–43581</td><td><span class="badge b-measured">Measured</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Timecode is plain binary, not BCD <span class="badge b-measured">Measured</span></div>
+        <p>
+          This is the trap. Early samples like <code>09 20 39</code> read
+          convincingly as BCD 09:20:39 — every nibble is a valid digit. It is
+          wrong. The seconds byte was observed taking all 60 values from
+          <code>0x00</code> to <code>0x3b</code>, and a captured minute rollover
+          settles it outright:
+        </p>
+        <pre>22 05 19 09 <b>23 3b</b> 14 58 62    minute 0x23, second 0x3b = 59
+22 05 19 09 <b>24 00</b> 03 58 ca    minute 0x24, second 0x00</pre>
+        <p>
+          <code>0x3b</code> is 59 in binary and nonsense in BCD. So that first
+          sample was really <b>09:32:57</b>, not 09:20:39. The date record, just
+          to be difficult, <em>is</em> BCD.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Frames run 0 to fps−1 <span class="badge b-measured">Measured</span></div>
+        <p>
+          All 25 values from <code>0x00</code> to <code>0x18</code> appeared and
+          none above, against a frame-rate byte of 25. That agreement is also the
+          main support for reading byte 2 as the frame rate at all.
+        </p>
+      </div>
+    </section>
+
+    <section id="subframe">
+      <h2><span class="n">04</span> The microsecond field</h2>
+      <div class="section-rule"></div>
+      <p>
+        Bytes 7–8 are the most useful part of the packet and the hardest to pin
+        down. They are <b>not</b> a checksum. They are a microsecond counter
+        within the current frame, which is what lets a reading be placed on a
+        timeline far more precisely than the 1.8 packets per second would suggest.
+      </p>
+
+      <div class="evidence">
+        <div class="claim">Not a CRC <span class="badge b-measured">Measured</span></div>
+        <p>
+          Two independent results. No standard CRC-16 — across the usual
+          polynomials, initial values, reflections and output masks — reproduces
+          the trailer from the preceding seven bytes. And solving over GF(2)
+          rules out the whole family at once: if the trailer were any linear
+          function of the payload, differences between payloads would map
+          consistently onto differences between trailers. Gaussian elimination
+          produced <b>250 contradictions</b>. That eliminates every CRC,
+          parity and XOR-style checksum, whatever its parameters.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">It is microseconds, at roughly 1 MHz <span class="badge b-measured">Measured</span></div>
+        <p>
+          Timing identifies it. Compare each packet's timecode against the host
+          clock when it arrived, and see which interpretation tracks best. Two
+          independent captures, trained and validated separately:
+        </p>
+        <div class="scroll-x" style="margin:14px 0">
+          <table style="min-width:460px">
+            <thead><tr><th>Interpretation</th><th class="num">Capture A (n=71)</th><th class="num">Capture B (n=113)</th></tr></thead>
+            <tbody>
+              <tr><td>Ignore the trailer</td><td class="num">8.0 ms</td><td class="num">9.0 ms</td></tr>
+              <tr><td>Fraction of a frame, ÷65536</td><td class="num">3.1 ms</td><td class="num">3.5 ms</td></tr>
+              <tr><td><b>Microseconds, ÷40000</b></td><td class="num"><b>0.61 ms</b></td><td class="num"><b>0.73 ms</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size:13.5px">
+          Median absolute residual against host arrival time. One frame at 25 fps
+          is 40 ms.
+        </p>
+        <p>
+          Ignoring the trailer leaves ~8 ms of error — almost exactly a quarter
+          frame, the signature of pure quantisation. Reading it as microseconds
+          collapses that by more than tenfold. Two further checks agree: the
+          observed values span <b>39 896</b>, against 40 000 µs in a frame at
+          25 fps; and free-fitting the scale with no assumptions lands on 39 728
+          and 39 376 in the two captures. A 1 MHz tick, divided into frames.
+        </p>
+      </div>
+
+      <div class="callout">
+        <div class="hd">A constant ~3.7 ms bias</div>
+        <p>
+          Values range <code>3685</code>–<code>43581</code>, not
+          <code>0</code>–<code>39999</code>. The window is the right width but
+          offset by about 3.7 ms, so this is not literally “microseconds since
+          the frame boundary”. The origin of the offset is unknown — a transmit-path
+          constant is a plausible guess and nothing more.
+        </p>
+        <p>
+          It doesn't matter for interpolation: a constant offset cancels the
+          moment you use a packet as an anchor and extrapolate from it. It does
+          matter if you try to use the field as an absolute phase.
+        </p>
+      </div>
+
+      <p>
+        The scaling by frame rate is an inference. Only a 25 fps device was
+        observed, so “1 000 000 ÷ fps microseconds per frame” is the natural
+        reading of a 1 MHz counter rather than something demonstrated at a second
+        rate. Scale by fps rather than hardcoding 40 000.
+      </p>
+    </section>
+
+    <section id="date">
+      <h2><span class="n">05</span> Date record — <code>0x42</code></h2>
+      <div class="section-rule"></div>
+      <p>
+        Roughly one packet in thirty, about every 11 seconds. It carries the date
+        the device is set to — the same date it writes into the LTC user bits.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Service data · date record</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <div class="scroll-x">
+            <div class="bytemap">
+              <div class="byterow">
+                <div class="byte r-head"><span class="idx">0</span><span class="hex">42</span></div>
+                <div class="byte r-head"><span class="idx">1</span><span class="hex">05</span></div>
+                <div class="byte r-data"><span class="idx">2</span><span class="hex">00</span></div>
+                <div class="byte r-data"><span class="idx">3</span><span class="hex">26</span></div>
+                <div class="byte r-data"><span class="idx">4</span><span class="hex">09</span></div>
+                <div class="byte r-data"><span class="idx">5</span><span class="hex">04</span></div>
+                <div class="byte r-data"><span class="idx">6</span><span class="hex">02</span></div>
+                <div class="byte r-tail"><span class="idx">7</span><span class="hex">a1</span></div>
+                <div class="byte r-tail"><span class="idx">8</span><span class="hex">00</span></div>
+              </div>
+              <div class="bracketrow">
+                <div class="bracket b-head">type<small>0x42</small></div>
+                <div class="bracket b-head">len<small>5</small></div>
+                <div class="bracket b-data">?<small>always 00</small></div>
+                <div class="bracket b-data">year<small>BCD</small></div>
+                <div class="bracket b-data">month<small>BCD</small></div>
+                <div class="bracket b-data">day<small>BCD</small></div>
+                <div class="bracket b-data">?<small>always 02</small></div>
+                <div class="bracket b-tail" style="grid-column: 8 / 10">constant<small>a1 00</small></div>
+              </div>
+            </div>
+          </div>
+          <div class="decoded">
+            <span class="lbl">Decodes to</span>
+            <span class="big">2026-09-04</span>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Unlike the timecode record, this one is BCD: <code>0x26 0x09 0x04</code>
+        reads as 26-09-04 and the device's date was in fact 4 September 2026.
+        Read as binary it would be 38-09-04, which is not a date.
+      </p>
+
+      <div class="evidence">
+        <div class="claim">The trailer here is a constant, not a counter <span class="badge b-measured">Measured</span></div>
+        <p>
+          All 11 date records were byte-for-byte identical, trailer included.
+          Whatever bytes 7–8 mean in a timecode record, they mean something else
+          here — or nothing. Bytes 2 and 6 were likewise fixed at <code>00</code>
+          and <code>02</code> and are unexplained.
+        </p>
+      </div>
+    </section>
+
+    <section id="mfr">
+      <h2><span class="n">06</span> Manufacturer data</h2>
+      <div class="section-rule"></div>
+      <p>
+        Alongside the service data, the device advertises a manufacturer-specific
+        record. It never changed across any capture, so there is little to go on.
+      </p>
+      <pre>company 0x043f    02 00 64 01 13</pre>
+      <p>
+        <code>0x64</code> is 100, and the device's battery was full throughout —
+        so “battery percent” is an obvious guess and an untested one. Confirming
+        it needs a device observed while discharging.
+        <span class="badge b-unknown" style="vertical-align:middle;margin-left:4px">Unknown</span>
+      </p>
+    </section>
+
+    <section id="ltc">
+      <h2><span class="n">07</span> LTC over audio</h2>
+      <div class="section-rule"></div>
+      <p>
+        The audio output is ordinary SMPTE 12M linear timecode — a documented
+        standard, unlike everything above. Included here for completeness, and
+        because getting it into a computer is less obvious than it looks.
+      </p>
+
+      <h3>The encoding</h3>
+      <p>
+        80 bits per video frame, biphase-mark encoded: every bit cell opens with a
+        transition, and a <code>1</code> adds a second one in the middle. A
+        <code>0</code> is therefore one long interval between transitions and a
+        <code>1</code> is two short ones. The code is self-clocking, readable at
+        any playback speed, and indifferent to signal polarity — a swapped
+        tip and ring changes nothing.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Frame layout · 80 bits</span></div>
+        <div class="scroll-x">
+          <table style="min-width:520px">
+            <thead><tr><th class="m">Bits</th><th>Field</th><th class="m">Bits</th><th>Field</th></tr></thead>
+            <tbody>
+              <tr><td class="m">0–3</td><td>Frame units</td><td class="m">32–35</td><td>Minute units</td></tr>
+              <tr><td class="m">8–9</td><td>Frame tens</td><td class="m">40–42</td><td>Minute tens</td></tr>
+              <tr><td class="m">10</td><td>Drop-frame flag</td><td class="m">48–51</td><td>Hour units</td></tr>
+              <tr><td class="m">11</td><td>Colour-frame flag</td><td class="m">56–57</td><td>Hour tens</td></tr>
+              <tr><td class="m">16–19</td><td>Second units</td><td class="m">4, 12, 20…60</td><td>User bits, 8 nibbles</td></tr>
+              <tr><td class="m">24–26</td><td>Second tens</td><td class="m">64–79</td><td>Sync word <code>0x3FFD</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p>
+        Fields are little-endian BCD. The sync word is what makes a free-running
+        bit stream parseable: twelve consecutive ones cannot occur in the payload,
+        so finding <code>0x3FFD</code> exactly 80 bits after the last one both
+        confirms alignment and delimits the frame.
+      </p>
+
+      <div class="callout">
+        <div class="hd">Getting it into a Mac</div>
+        <p>
+          The cable in the box is TRS-to-TRS, correct for a camera, where the
+          3.5 mm socket is a dedicated input. A Mac's jack is a headset jack with
+          a different pinout: tip and ring are headphone <em>outputs</em>, and the
+          microphone lives on the sleeve of a four-conductor CTIA plug. Insert a
+          three-conductor plug and its long sleeve bridges the ground and mic
+          contacts, which is precisely how macOS concludes “headphones, no mic”.
+        </p>
+        <p>
+          The signal has nowhere to go. Check with
+          <code>system_profiler SPAudioDataType</code>: if it reports
+          <b>External Headphones</b> and no external input appears, you need a
+          CTIA TRRS adapter or a USB audio interface.
+        </p>
+      </div>
+    </section>
+
+    <section id="usb">
+      <h2><span class="n">08</span> USB</h2>
+      <div class="section-rule"></div>
+      <p>
+        The USB-C port charges the device and speaks a vendor protocol to the
+        Tentacle app. It presents no audio and no serial port, so there is nothing
+        to read without reverse-engineering the protocol itself.
+      </p>
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Descriptor</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <table>
+            <tbody>
+              <tr><td style="width:36%"><b>Vendor / product</b></td><td class="m">0x16d0 / 0x0d40</td></tr>
+              <tr><td><b>Strings</b></td><td>Tentacle Sync GmbH — Tentacle Sync E Mk2</td></tr>
+              <tr><td><b>Device class</b></td><td class="m">0 (composite)</td></tr>
+              <tr><td><b>Interfaces</b></td><td class="m">2 × class 255 / sub 255 / proto 255</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:14px;font-size:14.5px;color:var(--ink-soft)">
+            Both interfaces are vendor-specific. No USB Audio Class descriptor, so
+            no CoreAudio device ever appears; no CDC, so no
+            <code>/dev/cu.*</code> either.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="method">
+      <h2><span class="n">09</span> Method</h2>
+      <div class="section-rule"></div>
+      <p>
+        Everything above came from watching advertisements against a device whose
+        timecode and date were known, with a scanner that dumps payloads and marks
+        which bytes changed between them. Fields announce themselves by how fast
+        they tick: one byte changing once a second is seconds, one changing 25
+        times a second at 25 fps is frames.
+      </p>
+      <pre>[  1.221s] Ricki
+    svc 0000fdac  22 05 19 09 22 33 06 a6 50
+[  1.538s] Ricki
+    svc 0000fdac  22 05 19 09 22 33 0e 97 45
+                                    ^^ ^^ ^^</pre>
+      <p>
+        Two techniques did the work that eyeballing could not. <b>GF(2)
+        elimination</b> tested the whole family of CRC-like checksums at once
+        instead of guessing polynomials one at a time. <b>Regression against host
+        arrival timestamps</b> identified the microsecond field, by asking which
+        interpretation of the bytes best predicts when a packet actually showed
+        up — and then confirming the answer on a capture that had not been used
+        to find it.
+      </p>
+      <p>
+        The corpus is 338 unique payloads over roughly 275 seconds, from a single
+        device at a single frame rate. That last part is the main limitation of
+        everything here.
+      </p>
+    </section>
+
+    <section id="open">
+      <h2><span class="n">10</span> Open questions</h2>
+      <div class="section-rule"></div>
+      <p>
+        Each of these needs a device the observed one couldn't provide.
+      </p>
+      <div class="panel">
+        <div class="scroll-x">
+          <table style="min-width:560px">
+            <thead><tr><th>Question</th><th>How to answer it</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><b>29.97 vs 30</b><br><span style="color:var(--ink-soft)">The rate is broadcast as a whole number, so the two are indistinguishable over the air.</span></td>
+                <td>Set a device to 29.97 and compare byte 2 against a 30 fps device.</td>
+              </tr>
+              <tr>
+                <td><b>Drop-frame</b><br><span style="color:var(--ink-soft)">No flag appears anywhere in the payload. LTC has one; BLE seems not to.</span></td>
+                <td>Watch byte 0 in drop-frame mode — the high nibble (2 vs 4) looks like it has room.</td>
+              </tr>
+              <tr>
+                <td><b>The 3.7 ms bias</b><br><span style="color:var(--ink-soft)">Real and consistent, origin unknown.</span></td>
+                <td>Compare against a second unit; a transmit-path constant should be identical across devices.</td>
+              </tr>
+              <tr>
+                <td><b>Manufacturer bytes</b><br><span style="color:var(--ink-soft)">Constant <code>02 00 64 01 13</code>; <code>0x64</code> = 100 hints at battery.</span></td>
+                <td>Capture while the battery discharges.</td>
+              </tr>
+              <tr>
+                <td><b>Date record bytes 2 and 6</b><br><span style="color:var(--ink-soft)">Fixed at <code>00</code> and <code>02</code>, and its trailer is a constant.</span></td>
+                <td>Change the date and see what moves.</td>
+              </tr>
+              <tr>
+                <td><b>Byte 1 as a length</b><br><span style="color:var(--ink-soft)">Always <code>0x05</code>; the reading is self-consistent but untested.</span></td>
+                <td>Find a record type with a different payload size.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <span>Observed against one Tentacle Sync E Mk2 at 25 fps, 4 September 2026.</span>
+    <span>No affiliation with Tentacle Sync GmbH.</span>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -4,8 +4,8 @@ How to read timecode off a Tentacle Sync E Mk2, three ways. **Nothing here comes
 from a published specification.** It is what the bytes did when watched against a
 device whose timecode and date were known.
 
-A formatted version of this document is published at
-<https://claude.ai/code/artifact/c47322ac-9c31-49f9-8a9e-0bac100f026b>.
+A formatted version lives at [`docs/protocol.html`](docs/protocol.html), and is
+published at <https://claude.ai/code/artifact/c47322ac-9c31-49f9-8a9e-0bac100f026b>.
 
 Every claim below is marked:
 
