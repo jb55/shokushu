@@ -2,6 +2,9 @@
 name = "shokushu"
 version = "0.1.0"
 edition = "2024"
+description = "Reads timecode from a Tentacle Sync E: over Bluetooth LE without pairing, or as SMPTE LTC from an audio input"
+license = "MIT"
+repository = "https://github.com/jb55/shokushu"
 
 [features]
 # Nothing on. A `cargo add shokushu` gets the decoders and no dependencies at

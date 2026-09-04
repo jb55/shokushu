@@ -332,3 +332,7 @@ device.
 All of that is in the always-available decoders, so a bare `cargo test` runs it.
 The scanner's own tests sit behind `scan`; `cargo test --all-features` is the
 whole suite.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
