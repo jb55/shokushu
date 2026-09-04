@@ -520,10 +520,11 @@ footer {
         <li><a href="#subframe"><span class="n">04</span>The microsecond field</a></li>
         <li><a href="#date"><span class="n">05</span>Date record</a></li>
         <li><a href="#mfr"><span class="n">06</span>Manufacturer data</a></li>
-        <li><a href="#ltc"><span class="n">07</span>LTC over audio</a></li>
-        <li><a href="#usb"><span class="n">08</span>USB</a></li>
-        <li><a href="#method"><span class="n">09</span>Method</a></li>
-        <li><a href="#open"><span class="n">10</span>Open questions</a></li>
+        <li><a href="#gatt"><span class="n">07</span>GATT services</a></li>
+        <li><a href="#ltc"><span class="n">08</span>LTC over audio</a></li>
+        <li><a href="#usb"><span class="n">09</span>USB</a></li>
+        <li><a href="#method"><span class="n">10</span>Method</a></li>
+        <li><a href="#open"><span class="n">11</span>Open questions</a></li>
       </ol>
     </nav>
   </div>
@@ -917,20 +918,119 @@ footer {
       <h2><span class="n">06</span> Manufacturer data</h2>
       <div class="section-rule"></div>
       <p>
-        Alongside the service data, the device advertises a manufacturer-specific
-        record. It never changed across any capture, so there is little to go on.
+        Alongside the service data — same advertisement, different field, and a
+        different event to a scanner, which is why it is easy to miss.
       </p>
-      <pre>company 0x043f    02 00 64 01 13</pre>
+      <pre>company 0x043f    02 00 64 01 13
+                        ~~ battery</pre>
+
+      <div class="evidence">
+        <div class="claim">Byte 2 is the battery level <span class="badge b-measured">Measured</span></div>
+        <p>
+          Two boxes were put in range of each other and read differently in that
+          byte and nowhere else:
+        </p>
+        <pre>Ricki     02 00 64 01 13      0x64 = 100
+Liliana   02 00 61 01 13      0x61 =  97</pre>
+        <p>
+          Two devices disagreeing is suggestive but not a gauge — the byte could
+          be a serial number's last octet for all that shows. What settles it is
+          that it moves, in the right direction, on its own. Over a 45-minute
+          capture with both boxes sitting untouched, Liliana went <code>61</code>
+          → <code>60</code> and stayed there, while Ricki held at <code>64</code>
+          throughout:
+        </p>
+        <pre>[  0.046s] Liliana    02 00 61 01 13
+[  0.327s] Ricki      02 00 64 01 13
+[160.773s] Liliana    02 00 60 01 13</pre>
+        <p>
+          Nothing else in either record changed at any point — not the four bytes
+          around it, not on either device. A byte that differs between two
+          devices, decrements by one on the one that isn't full, never rises, and
+          sits at exactly 100 on the one that is, is a charge level.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">That the scale is percent is a step less certain <span class="badge b-inferred">Inferred</span></div>
+        <p>
+          100 is the largest value seen and 96 the smallest, so the top of the
+          range is pinned and everything below it is extrapolation. Percent is
+          the natural reading of a gauge that stops at 100, but only a real
+          discharge would show whether it reaches 0 linearly, or at all. Nothing
+          here has seen a box below 96.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">The other four bytes are still unknown <span class="badge b-unknown">Unknown</span></div>
+        <p>
+          <code>02 00</code> and <code>01 13</code> were identical on both
+          devices and across every capture. That is what a hardware or firmware
+          constant looks like — and equally what a field that simply never
+          changed looks like. Both boxes report the same firmware and hardware
+          revisions over GATT, so two of them cannot tell those apart; a device
+          on a different revision would. A <em>charging</em> device was never
+          observed either, so nothing is known about whether the byte tracks
+          upwards or whether one of these bytes carries a charging flag.
+        </p>
+      </div>
+    </section>
+
+    <section id="gatt">
+      <h2><span class="n">07</span> GATT services</h2>
+      <div class="section-rule"></div>
       <p>
-        <code>0x64</code> is 100, and the device's battery was full throughout —
-        so “battery percent” is an obvious guess and an untested one. Confirming
-        it needs a device observed while discharging.
-        <span class="badge b-unknown" style="vertical-align:middle;margin-left:4px">Unknown</span>
+        Everything above is passive: the device broadcasts it and a scanner
+        listens. Connecting reveals a little more, at the cost of no longer being
+        passive.
       </p>
+      <div class="scroll-x">
+        <table style="min-width:460px">
+          <thead><tr><th>Service</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>0x180a</code> Device Information</td>
+              <td>model number, serial number, firmware and hardware revision, manufacturer name</td>
+            </tr>
+            <tr>
+              <td><code>0xfdac</code> vendor</td>
+              <td>four characteristics, three <code>READ | NOTIFY</code> and one <code>WRITE</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <pre>0dab1280-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
+0dab144c-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
+0dab17e4-2cb9-11e6-b67b-9e71128cae77   WRITE
+0dab2496-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY</pre>
+      <p>
+        The vendor characteristics are unexamined. Reading one is harmless
+        enough, but the write is presumably how the Tentacle app sets a device's
+        time and name, and poking at it blind is how a box ends up needing a
+        factory reset.
+      </p>
+      <p>Device Information reads, identically on both units:</p>
+      <pre>manufacturer name    "Tentacle Sync GmbH"
+hardware revision    "1.2 SYNCE2"
+firmware revision    "H: 1.1.5 BT: 2.4.2"
+serial number        twelve digits, e.g. "2205........"
+model number         six bytes that aren't text, then a NUL</pre>
+
+      <div class="evidence">
+        <div class="claim">There is no Battery Service <span class="badge b-measured">Measured</span></div>
+        <p>
+          No <code>0x180f</code>, and no Battery Level characteristic
+          <code>0x2a19</code> anywhere in the tree. The standard route to a
+          charge level does not exist on this device, which makes the
+          manufacturer advertisement the only place it is published — and the
+          better place anyway, since reading it needs no connection.
+        </p>
+      </div>
     </section>
 
     <section id="ltc">
-      <h2><span class="n">07</span> LTC over audio</h2>
+      <h2><span class="n">08</span> LTC over audio</h2>
       <div class="section-rule"></div>
       <p>
         The audio output is ordinary SMPTE 12M linear timecode — a documented
@@ -992,7 +1092,7 @@ footer {
     </section>
 
     <section id="usb">
-      <h2><span class="n">08</span> USB</h2>
+      <h2><span class="n">09</span> USB</h2>
       <div class="section-rule"></div>
       <p>
         The USB-C port charges the device and speaks a vendor protocol to the
@@ -1020,7 +1120,7 @@ footer {
     </section>
 
     <section id="method">
-      <h2><span class="n">09</span> Method</h2>
+      <h2><span class="n">10</span> Method</h2>
       <div class="section-rule"></div>
       <p>
         Everything above came from watching advertisements against a device whose
@@ -1051,7 +1151,7 @@ footer {
     </section>
 
     <section id="open">
-      <h2><span class="n">10</span> Open questions</h2>
+      <h2><span class="n">11</span> Open questions</h2>
       <div class="section-rule"></div>
       <p>
         Each of these needs a device the observed one couldn't provide.
@@ -1074,8 +1174,12 @@ footer {
                 <td>Compare against a second unit; a transmit-path constant should be identical across devices.</td>
               </tr>
               <tr>
-                <td><b>Manufacturer bytes</b><br><span style="color:var(--ink-soft)">Constant <code>02 00 64 01 13</code>; <code>0x64</code> = 100 hints at battery.</span></td>
-                <td>Capture while the battery discharges.</td>
+                <td><b>The battery scale below 96</b><br><span style="color:var(--ink-soft)">Byte 2 is a charge level and 100 is its top, but no box has been watched below 96.</span></td>
+                <td>Run one flat and see whether it reaches 0, and whether it gets there linearly.</td>
+              </tr>
+              <tr>
+                <td><b>The other four manufacturer bytes</b><br><span style="color:var(--ink-soft)"><code>02 00</code> and <code>01 13</code>, identical on two devices of the same revision — which cannot distinguish a constant from a field that hasn't moved.</span></td>
+                <td>Compare against a device on different firmware, and watch them on one that's charging.</td>
               </tr>
               <tr>
                 <td><b>Date record bytes 2 and 6</b><br><span style="color:var(--ink-soft)">Fixed at <code>00</code> and <code>02</code>, and its trailer is a constant.</span></td>

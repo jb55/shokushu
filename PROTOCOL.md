@@ -20,6 +20,12 @@ reception timing and an independent fifth by a second implementation — all fro
 **one** device at **one** frame rate (25 fps), on 2026-09-04. That last part is
 the main limitation of everything here.
 
+A second device, on the same firmware and also at 25 fps, was added later that
+day: a 45-minute two-box capture and a GATT probe of both. It lifts the
+single-device caveat only where it says so — the battery byte and the GATT tree.
+Two boxes of the same revision still cannot separate a firmware constant from a
+field that never moved, and nothing here has yet seen a second frame rate.
+
 ## Three transports
 
 | Transport | Rate | Precision | Availability |
@@ -210,14 +216,93 @@ timecode record, they mean something else here — or nothing.
 
 ### Manufacturer data
 
-Advertised alongside the service data, and never changed across any capture.
+Advertised alongside the service data — same advertisement, different field, and
+a different event to a scanner, which is why it is easy to miss.
 
 ```
 company 0x043f    02 00 64 01 13
+                        ~~ battery
 ```
 
-`0x64` is 100 and the battery was full throughout, so "battery percent" is an
-obvious guess and an untested one. [unknown]
+**Byte 2 is the battery level.** [measured] Two boxes were put in range of each
+other and read differently in that byte and nowhere else:
+
+```
+Ricki     02 00 64 01 13      0x64 = 100
+Liliana   02 00 61 01 13      0x61 =  97
+```
+
+Two devices disagreeing is suggestive but not a gauge — the byte could be a
+serial number's last octet for all that shows. What settles it is that it moves,
+in the right direction, on its own. Over a 45-minute capture with both boxes
+sitting untouched, Liliana went `61` → `60` and stayed there, while Ricki held at
+`64` throughout:
+
+```
+[  0.046s] Liliana    02 00 61 01 13
+[  0.327s] Ricki      02 00 64 01 13
+[160.773s] Liliana    02 00 60 01 13
+```
+
+Nothing else in either record changed at any point — not the four bytes around
+it, not on either device. A byte that differs between two devices, decrements by
+one on the one that isn't full, never rises, and sits at exactly 100 on the one
+that is, is a charge level.
+
+**That the scale is percent is a step less certain.** [inferred] 100 is the
+largest value seen and 96 the smallest, so the top of the range is pinned and
+everything below it is extrapolation. Percent is the natural reading of a gauge
+that stops at 100, but only a real discharge would show whether it reaches 0
+linearly, or at all. Nothing here has seen a box below 96.
+
+**The other four bytes are still unknown.** [unknown] `02 00` and `01 13` were
+identical on both devices and across every capture. That is what a hardware or
+firmware constant looks like — and equally what a field that simply never changed
+looks like. Both boxes report the same firmware and hardware revisions over GATT
+(below), so two of them cannot tell those apart. A device on a different revision
+would.
+
+Note that a *charging* device was never observed, so nothing is known about
+whether the byte tracks upwards, or whether one of the unexplained bytes carries
+a charging flag.
+
+### GATT services
+
+Everything above is passive: the device broadcasts it and a scanner listens.
+Connecting reveals a little more, at the cost of no longer being passive.
+[measured]
+
+| Service | Contents |
+|---|---|
+| `0x180a` Device Information | model number, serial number, firmware and hardware revision, manufacturer name |
+| `0xfdac` vendor | four characteristics, three `READ｜NOTIFY` and one `WRITE` |
+
+```
+0dab1280-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
+0dab144c-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
+0dab17e4-2cb9-11e6-b67b-9e71128cae77   WRITE
+0dab2496-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
+```
+
+The vendor characteristics are unexamined. Reading one is harmless enough, but
+the write is presumably how the Tentacle app sets a device's time and name, and
+poking at it blind is how a box ends up needing a factory reset.
+
+Device Information reads, identically on both units:
+
+```
+manufacturer name    "Tentacle Sync GmbH"
+hardware revision    "1.2 SYNCE2"
+firmware revision    "H: 1.1.5 BT: 2.4.2"
+serial number        twelve digits, e.g. "2205........"
+model number         six bytes that aren't text, then a NUL
+```
+
+**There is no Battery Service.** [measured] No `0x180f`, and no Battery Level
+characteristic `0x2a19` anywhere in the tree. The standard route to a charge
+level does not exist on this device, which makes the manufacturer advertisement
+above the only place it is published — and the better place anyway, since reading
+it needs no connection.
 
 ## LTC over audio
 
@@ -310,7 +395,13 @@ Each needs a device the observed one couldn't provide.
   has room.
 - **The 3.7 ms bias.** Real and consistent, origin unknown. Compare against a
   second unit; a transmit-path constant should be identical across devices.
-- **Manufacturer bytes.** Capture while the battery discharges.
+- **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
+  level and 100 is its top, but no box has been watched below 96. Run one flat
+  and see whether it reaches 0, and whether it gets there linearly.
+- **The other four manufacturer bytes,** `02 00` and `01 13`. Identical on two
+  devices of the same revision, which cannot distinguish a constant from a field
+  that hasn't moved. Compare against a device on a different firmware — and watch
+  them on a device that's charging, which none yet has been.
 - **Date record bytes 2 and 6,** fixed at `00` and `02`, and its constant trailer.
   Change the date and see what moves.
 - **Byte 1 as a length.** Find a record type with a different payload size.

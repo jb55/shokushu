@@ -10,8 +10,8 @@ written up in [PROTOCOL.md](PROTOCOL.md).
 ```
 $ tentacle-ble
 adapter state: PoweredOn — scanning until interrupted
-  11:12:00:16.5     25 fps   Ricki     2026-09-04   -43 dBm
-  11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm
+  11:12:00:16.5     25 fps   Ricki     2026-09-04   -43 dBm   100%
+  11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm    96%
 ```
 
 ```
@@ -54,12 +54,20 @@ never does. If nothing arrives for five seconds it stops rather than inventing
 frames, and says so:
 
 ```
-  10:03:40:16.8     25 fps   Ricki     2026-09-04   -46 dBm   no signal for 6.1s
+  10:03:40:16.8     25 fps   Ricki     2026-09-04   -46 dBm   100%   no signal for 6.1s
 ```
 
 Reception is bursty enough that a gap is usually worth waiting out, so the line
 stays, frozen on the last reading that arrived. After thirty seconds of silence
 it goes: by then the box has been switched off rather than merely missed.
+
+The percentage at the end of the line is the battery. The device broadcasts it
+alongside the timecode, in a manufacturer-data field, and it appears once one has
+arrived — a second or two after the line itself, since the two are separate
+advertisements. There is no Battery Service to read over GATT; this is the only
+place a Sync E publishes its charge, and reading it costs nothing, since it is in
+a broadcast that was being listened to anyway. How that was established, and how
+far the scale is actually pinned down, is in [PROTOCOL.md](PROTOCOL.md).
 
 Worth being clear about: interpolating makes the display *smooth*, not more
 *accurate*. It adds no information the advertisements didn't carry. `--json` is
@@ -96,6 +104,28 @@ binary, not BCD**, which is easy to get backwards because most samples look like
 valid BCD; the date record, inconsistently, *is* BCD. And **the frame rate
 arrives as a whole number**, so 29.97 and 30 are indistinguishable over the air
 and no drop-frame flag is broadcast at all. Only 25 fps has ever been observed.
+
+### tentacle-probe
+
+Everything above listens and never transmits. `tentacle-probe` is the exception,
+and is kept separate for that reason: it connects to each Tentacle in range,
+lists its GATT services and characteristics, and reads the standard Device
+Information and battery ones.
+
+```
+$ tentacle-probe
+=== Ricki  [7806a574-7711-abac-3737-c42b79c16804]
+  00002a29-…  (manufacturer name)   = "Tentacle Sync GmbH"
+  00002a27-…  (hardware revision)   = "1.2 SYNCE2"
+  …
+```
+
+It exists to answer a question — is the charge level available anywhere other
+than the advertisement? — and the answer is no: there is no Battery Service on
+this device. Reach for it when a new firmware appears and that might have
+changed, not as part of reading timecode. Connecting is not free; it can disturb
+the advertising that the rest of this depends on, and it is per-device. The
+vendor characteristics, one of which is writable, are listed but never touched.
 
 ## Wiring it to a Mac
 

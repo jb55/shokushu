@@ -62,6 +62,9 @@ struct Seen {
     name: Option<String>,
     rssi: Option<i16>,
     date: Option<Date>,
+    /// Remaining charge, from the manufacturer record — which rides in the same
+    /// advertisement as the timecode but arrives as its own event.
+    battery: Option<u8>,
     /// The local clock this device's advertisements anchor.
     clock: FreeRun,
     /// When this device first sent timecode, which is where its line sits.
@@ -193,6 +196,21 @@ fn decode(
     event: CentralEvent,
     arrived: Instant,
 ) {
+    if let CentralEvent::ManufacturerDataAdvertisement {
+        manufacturer_data, ..
+    } = &event
+    {
+        // Charge, not time: hold onto it and let the timecode below do the
+        // printing. It changes about once every twenty minutes, so there's no
+        // sense in it driving anything.
+        if let Some(bytes) = manufacturer_data.get(&ble::COMPANY_ID)
+            && let Some(status) = ble::parse_manufacturer(bytes)
+        {
+            seen.battery = Some(status.battery_percent);
+        }
+        return;
+    }
+
     let CentralEvent::ServiceDataAdvertisement { service_data, .. } = event else {
         return;
     };
@@ -212,7 +230,7 @@ fn decode(
         Advert::Timecode(tc) => {
             if opt.json {
                 println!(
-                    r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{}}}"#,
+                    r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{}}}"#,
                     tc.hours,
                     tc.minutes,
                     tc.seconds,
@@ -222,6 +240,7 @@ fn decode(
                     seen.name.as_deref().unwrap_or("<unnamed>"),
                     seen.date.map_or("null".into(), |d| format!("\"{d}\"")),
                     seen.rssi.map_or("null".to_string(), |r| r.to_string()),
+                    seen.battery.map_or("null".to_string(), |b| b.to_string()),
                 );
             } else {
                 seen.first_timecode.get_or_insert(arrived);
@@ -242,6 +261,7 @@ struct Row {
     name: String,
     date: Option<Date>,
     rssi: Option<i16>,
+    battery: Option<u8>,
     note: String,
 }
 
@@ -280,6 +300,7 @@ fn render(seen: &mut HashMap<PeripheralId, Seen>, drawn: &mut usize, now: Instan
             name: entry.name.clone().unwrap_or_else(|| "<unnamed>".into()),
             date: entry.date,
             rssi: entry.rssi,
+            battery: entry.battery,
             note,
         });
     }
@@ -307,13 +328,15 @@ fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
     rows.iter()
         .map(|r| {
             format!(
-                "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}",
+                "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}{}",
                 r.tc,
                 tenth(r.tc.subframe_fraction()),
                 r.tc.fps,
                 r.name,
                 r.date.map_or(String::new(), |d| format!("   {d}")),
                 r.rssi.map_or(String::new(), |v| format!("   {v} dBm")),
+                // Right-aligned, so 100% and 7% keep the note in one column.
+                r.battery.map_or(String::new(), |v| format!("   {v:>3}%")),
                 r.note,
             )
         })
@@ -499,6 +522,7 @@ mod tests {
             name: name.into(),
             date: None,
             rssi: Some(-46),
+            battery: Some(97),
             note: String::new(),
         }
     }
@@ -559,6 +583,34 @@ mod tests {
         let two = || row((at, "aabbccdd"), "Ricki");
 
         assert_eq!(lay_out(vec![one(), two()]), lay_out(vec![two(), one()]));
+    }
+
+    #[test]
+    fn the_battery_column_keeps_its_width_at_every_charge() {
+        // 100% and 7% are three characters apart written plainly, which would
+        // shunt the "no signal" note sideways between one device and the next.
+        let at = Instant::now();
+        let mut full = row((at, "00112233"), "Bob");
+        full.battery = Some(100);
+        let mut low = row((at + Duration::from_secs(1), "aabbccdd"), "Ricki");
+        low.name = "Bob".into();
+        low.battery = Some(7);
+
+        let lines = lay_out(vec![full, low]);
+        assert!(lines[0].contains("100%"), "{:?}", lines[0]);
+        assert!(lines[1].contains("  7%"), "{:?}", lines[1]);
+        assert_eq!(lines[0].len(), lines[1].len());
+    }
+
+    #[test]
+    fn a_device_that_has_not_sent_its_battery_yet_leaves_the_column_out() {
+        // The manufacturer record arrives as its own event, so a device can be
+        // showing timecode before any charge is known. Better a missing column
+        // than a made-up number.
+        let at = Instant::now();
+        let mut row = row((at, "00112233"), "Bob");
+        row.battery = None;
+        assert!(!lay_out(vec![row])[0].contains('%'));
     }
 
     #[test]

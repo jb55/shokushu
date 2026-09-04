@@ -53,6 +53,38 @@
 //!
 //! On a date record the trailer is instead a fixed `a1 00`, so it means
 //! something else there, and is ignored.
+//!
+//! Alongside the service data — in the same advertisement but a separate field,
+//! and a separate event to a scanner — the device sends a five-byte
+//! manufacturer record under company `0x043f`:
+//!
+//! ```text
+//!   02 00 64 01 13
+//!         ~~ battery percent
+//! ```
+//!
+//! Byte 2 is the remaining charge. Two boxes advertising side by side read 100
+//! and 97 while the other four bytes were identical on both, and the one reading
+//! 97 dropped to 96 partway through a capture, by itself, with nothing else in
+//! either record moving. A byte that differs between two devices, counts down on
+//! the device that isn't full, and sits at exactly 100 on the one that is, is a
+//! charge level.
+//!
+//! That it's a *percentage* is one step less certain: 100 is the largest value
+//! seen and 96 the smallest, so the scale is anchored at the top and unobserved
+//! below. It reads as a percentage rather than, say, tenths of a volt, but only
+//! a fuller discharge would show that.
+//!
+//! The other four bytes are unknown. They were identical across both devices,
+//! which is what a hardware or firmware constant looks like — and equally what a
+//! field that simply never changed looks like. Two boxes of the same revision
+//! can't tell those apart, so nothing is claimed about them.
+//!
+//! There is no Battery Service. The device's GATT server offers only Device
+//! Information (`0x180a`) and its own `0xfdac`, with no `0x180f` and no battery
+//! characteristic anywhere, so the advertisement is the only place a charge
+//! level is published — which is just as well, since reading it needs no
+//! connection.
 
 use std::fmt;
 
@@ -237,6 +269,34 @@ fn bcd(byte: u8) -> Option<u8> {
     (high <= 9 && low <= 9).then_some(high * 10 + low)
 }
 
+/// The Bluetooth SIG company identifier the Tentacle's manufacturer data is
+/// advertised under.
+pub const COMPANY_ID: u16 = 0x043F;
+
+/// What the manufacturer record says about the device itself, as opposed to the
+/// time it's keeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    /// Remaining charge, 0 to 100. See the module docs for how that scale was
+    /// established, and for the four bytes around it that weren't.
+    pub battery_percent: u8,
+}
+
+/// Parses one manufacturer-data record advertised under [`COMPANY_ID`].
+///
+/// Returns `None` for anything that isn't the five-byte record this device
+/// sends, or whose battery byte is out of range — which is also what keeps
+/// another vendor's record from being read as a charge level. The four bytes
+/// that aren't understood are deliberately not required to hold any particular
+/// value: they were the same on both devices ever seen, and rejecting a record
+/// for disagreeing with a sample of one revision would be fitting to noise.
+pub fn parse_manufacturer(data: &[u8]) -> Option<Status> {
+    let &[_, _, battery_percent, _, _] = data else {
+        return None;
+    };
+    (battery_percent <= 100).then_some(Status { battery_percent })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +440,50 @@ mod tests {
         for case in cases {
             assert!(parse(case).is_none(), "{case:02x?} should not have parsed");
         }
+    }
+    #[test]
+    fn reads_the_battery_out_of_the_manufacturer_record() {
+        // Both boxes as they advertised on 2026-09-04, and Liliana again after
+        // she'd ticked down one. The four bytes around the battery were the same
+        // on both devices and stayed put across the change.
+        let cases = [
+            ([0x02, 0x00, 0x64, 0x01, 0x13], 100),
+            ([0x02, 0x00, 0x61, 0x01, 0x13], 97),
+            ([0x02, 0x00, 0x60, 0x01, 0x13], 96),
+        ];
+        for (payload, expected) in cases {
+            let Some(status) = parse_manufacturer(&payload) else {
+                panic!("{payload:02x?} did not parse");
+            };
+            assert_eq!(status.battery_percent, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_a_manufacturer_record_that_is_not_ours() {
+        let cases: &[&[u8]] = &[
+            &[],
+            &[0x02, 0x00, 0x64, 0x01],             // four bytes, not five
+            &[0x02, 0x00, 0x64, 0x01, 0x13, 0x00], // six
+            &[0x02, 0x00, 0x65, 0x01, 0x13],       // 101%
+            &[0x02, 0x00, 0xff, 0x01, 0x13],
+        ];
+        for case in cases {
+            assert!(
+                parse_manufacturer(case).is_none(),
+                "{case:02x?} should not have parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_byte_changing_does_not_stop_the_battery_being_read() {
+        // The four bytes either side aren't understood, so a device or a
+        // firmware that sets them differently must still yield its charge
+        // rather than being thrown away for disagreeing with our one sample.
+        let Some(status) = parse_manufacturer(&[0x03, 0xff, 0x2a, 0x00, 0x7f]) else {
+            panic!("rejected a record over bytes we don't claim to understand");
+        };
+        assert_eq!(status.battery_percent, 42);
     }
 }
