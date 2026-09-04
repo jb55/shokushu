@@ -196,7 +196,7 @@ for device in scan.devices() {
 }
 ```
 
-`cargo run --example scan` runs both side by side.
+`cargo run --features scan --example scan` runs both side by side.
 
 When nothing decodes, `scan.diagnosis()` says which of the failures it is —
 nothing in range, something in range whose payload no longer decodes, or a scan
@@ -213,17 +213,25 @@ hold of the bytes is what costs something, and that is what the features gate �
 `scan` for Bluetooth (`btleplug` and a tokio runtime), `audio` for the LTC
 binary's input (`cpal`), `cli` for the binaries.
 
-All three are on by default so `cargo run` works as it always has. Reading
-Bluetooth without compiling an audio stack:
+None are on by default, so `cargo add tentacle` is the decoders alone — no
+transport, no dependencies at all:
 
 ```toml
-tentacle = { version = "0.1", default-features = false, features = ["scan"] }
+tentacle = "0.1"
 ```
 
-Or the decoders alone, with no transport and no dependencies at all:
+Reading Bluetooth, without compiling an audio stack:
 
 ```toml
-tentacle = { version = "0.1", default-features = false }
+tentacle = { version = "0.1", features = ["scan"] }
+```
+
+The binaries in this repo declare the features they need, so running one from a
+checkout names them:
+
+```
+cargo run --features scan,cli --bin tentacle-ble
+cargo run --features audio,cli --bin tentacle
 ```
 
 ### Timecode
@@ -316,3 +324,7 @@ under jitter far worse than reception really is, stays inside a frame of a
 device whose crystal drifts, reports signal loss instead of extrapolating
 through it, and snaps rather than slews when the timecode is changed on the
 device.
+
+All of that is in the always-available decoders, so a bare `cargo test` runs it.
+The scanner's own tests sit behind `scan`; `cargo test --all-features` is the
+whole suite.

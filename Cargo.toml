@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Everything on, so the binaries build and run as they always have. A library
-# consumer wanting the decoders alone takes `default-features = false` and adds
-# back what it needs — the point of the split is that reading Bluetooth doesn't
-# have to compile an audio stack, not that a bare `cargo run` should stop
-# working here.
-default = ["scan", "audio", "cli"]
+# Nothing on. A `cargo add tentacle` gets the decoders and no dependencies at
+# all — reading an advertisement shouldn't compile a Bluetooth stack, let alone
+# an audio one. The cost lands on this repo instead: the binaries declare their
+# `required-features`, so building or running one here names them
+# (`cargo run --features scan,cli --bin tentacle-ble`).
+default = []
 
 # The Bluetooth transport: `ble::Scanner`, `ble::Device`, `ble::diagnostics`.
 # Parsing an advertisement needs none of it — `ble::parse` is always available.
