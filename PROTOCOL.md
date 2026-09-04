@@ -26,6 +26,13 @@ single-device caveat only where it says so — the battery byte and the GATT tre
 Two boxes of the same revision still cannot separate a firmware constant from a
 field that never moved, and nothing here has yet seen a second frame rate.
 
+Both boxes were then connected to the Tentacle phone app and synced, and a
+header byte changed on both. Two claims below are corrections rather than
+additions — byte 1 is not a length, and the date record's trailer is not a
+constant — and both had been believed on the strength of a byte that never
+varied in a corpus too small to make it vary. Where a claim below rests on
+"never observed to change", read it with that in mind.
+
 ## Three transports
 
 | Transport | Rate | Precision | Availability |
@@ -98,11 +105,11 @@ and a strong RSSI do not fix this — the figures above are near-ideal condition
 Every payload is nine bytes with the same shape. [measured]
 
 ```
-   22   05   19 09 23 3b 14   58 62
+   22   7d   19 0b 25 28 15   5f c6
    ~~   ~~   ~~~~~~~~~~~~~~   ~~~~~
    |    |    |                `-- trailer, big-endian u16
    |    |    `-- data field, five bytes, meaning set by type
-   |    `-- length, always 0x05
+   |    `-- flags, meaning unknown — NOT a length
    `-- record type
 ```
 
@@ -111,9 +118,33 @@ Every payload is nine bytes with the same shape. [measured]
 | `0x22` | Timecode | 337 of 348 |
 | `0x42` | Date | 11 of 348 |
 
-Byte 1 was `0x05` in every packet observed, and every packet was nine bytes.
-Reading it as a length is self-consistent but untested — no packet of another
-size ever turned up. [inferred]
+**Byte 1 is not a length.** [measured] This document said it was, marked
+[inferred], on the grounds that it held `0x05` in every packet ever seen — which
+is exactly the width of the data field that follows — and that no packet of
+another size had turned up to contradict it. Both halves of that were true and
+the conclusion was still wrong.
+
+The two boxes were then connected to the Tentacle phone app to sync them, and
+byte 1 came back `0x7d` on both. The packets stayed nine bytes. A parser reading
+byte 1 as a length asks for 125 bytes of a nine-byte payload, rejects every
+advertisement, and — this being the third failure mode, and the reason this
+paragraph is worth its length — reports nothing at all, because a scanner with
+no valid readings looks exactly like a scanner with nothing in range.
+
+| | Byte 1 | Payload size |
+|---|---|---|
+| Before the app sync | `0x05` ×117, `0x07` ×2 | 9 bytes, always |
+| After the app sync | `0x7d` ×2199, `0x7c` ×4 | 9 bytes, always |
+
+Across 2,322 payloads either side of the change the size never moved, so byte 1
+does not describe it. **Read the layout as fixed: two header bytes, a five-byte
+data field, an optional two-byte trailer.** [measured]
+
+What byte 1 *does* mean is unknown. The sync set bits 3–6 together (`0x05` →
+`0x7d` is `|= 0x78`) and the bottom bit or two flicker on their own — two `0x07`
+packets before, four `0x7c` after. That is the shape of a flags byte and not
+evidence of what it flags, so don't special-case a value: `0x7c` alone shows
+that whatever byte 1 is, today's value isn't stable either. [unknown]
 
 ### Timecode record — `0x22`
 
@@ -197,7 +228,7 @@ Roughly one packet in thirty, about every 11 seconds. Carries the date the devic
 is set to — the same date it writes into the LTC user bits.
 
 ```
-   42   05   00 26 09 04 02   a1 00
+   42   7d   00 26 09 04 02   a1 00
              |  |  |  |  |
              |  |  |  |  `-- always 0x02  [unknown]
              |  |  |  `-- day,   BCD
@@ -210,9 +241,21 @@ Unlike the timecode record this one is BCD: `0x26 0x09 0x04` reads as 26-09-04 a
 the device's date was 4 September 2026. Read as binary it would be 38-09-04, which
 is not a date. [measured]
 
-**The trailer here is a constant, not a counter.** [measured] All 11 date records
-were byte-for-byte identical, trailer included. Whatever bytes 7–8 mean in a
-timecode record, they mean something else here — or nothing.
+**The trailer here is not a microsecond count, and not quite a constant
+either.** [measured] This document said it was a constant, on 11 date records
+that were byte-for-byte identical. A larger corpus — 124 date records — splits
+it: byte 7 is `a1` in all of them, and byte 8 is `00` in 112 and something else
+in the remaining 12, with no value repeating (`12`, `1b`, `33`, `43`, `47`,
+`54`, `67`, `8c`, `a1`, `b6`, `f2`, `f9`).
+
+So whatever bytes 7–8 are here, they are not the microsecond-into-frame counter
+of a timecode record — a date record names no frame — and they are not fixed.
+One byte pinned and the other mostly-but-not-always zero is the signature of a
+field this corpus is too small to have provoked. Nothing reads it. [unknown]
+
+That correction is worth noting as a method point: 11 identical samples looked
+like proof of a constant, and were not. It is the same mistake as byte 1 above,
+found the same way — by capturing more.
 
 ### Manufacturer data
 
@@ -402,9 +445,15 @@ Each needs a device the observed one couldn't provide.
   devices of the same revision, which cannot distinguish a constant from a field
   that hasn't moved. Compare against a device on a different firmware — and watch
   them on a device that's charging, which none yet has been.
-- **Date record bytes 2 and 6,** fixed at `00` and `02`, and its constant trailer.
-  Change the date and see what moves.
-- **Byte 1 as a length.** Find a record type with a different payload size.
+- **Date record bytes 2 and 6,** fixed at `00` and `02`. Change the date and see
+  what moves.
+- **What byte 1's bits mean.** Answered in the negative — it is not a length —
+  but not answered. Bits 3–6 went on together when the boxes were synced to the
+  phone app, so toggle app settings one at a time and watch which bit follows;
+  the bottom bits flicker on their own and want a long capture to correlate
+  against anything.
+- **Date record byte 8.** `00` in 112 records of 124 and twelve other values
+  once each. Capture across a date change and across midnight.
 
 ---
 

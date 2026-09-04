@@ -6,25 +6,40 @@
 //! timecode and date were known:
 //!
 //! ```text
-//!   22 05 19 09 23 3b 14   58 62
+//!   22 7d 19 0b 25 28 15   5f c6
 //!   ~~ record type
-//!      ~~ length of the data field
+//!      ~~ flags, meaning unknown
 //!         ~~~~~~~~~~~~~~~~ data
 //!                          ~~~~~ trailer
 //! ```
+//!
+//! **Byte 1 is not a length**, though it read like one for a while. It was
+//! `0x05` in every packet of the early captures — exactly the width of the data
+//! field that follows — so this parser derived the field from it. Then two boxes
+//! were connected to the Tentacle phone app to sync them, and byte 1 became
+//! `0x7d` on both while the packets stayed nine bytes. Read as a length, 125
+//! runs 118 bytes off the end, so every advertisement was rejected and the
+//! scanner went silently blind.
+//!
+//! What it actually is, is unknown. Values seen: `0x05` and `0x07` before that
+//! sync, `0x7c` and `0x7d` after — bits 3–6 turning on together and the bottom
+//! bit or two flickering, which looks like flags and is not evidence of what
+//! they flag. The layout here is therefore fixed rather than self-describing:
+//! two header bytes, five data bytes, an optional two-byte trailer. That holds
+//! across all 2,322 payloads captured either side of the change.
 //!
 //! Two record types turn up. `0x22` carries the timecode, as plain binary (not
 //! BCD — seconds were seen reaching 0x3b and rolling to 0x00 as the minute
 //! advanced), preceded by the frame rate:
 //!
 //! ```text
-//!   22 05 | 19 09 23 3b 14        fps=25, 09:35:59:20
+//!   22 7d | 19 0b 25 28 15        fps=25, 11:37:40:21
 //! ```
 //!
 //! `0x42` carries the date, and this one *is* BCD:
 //!
 //! ```text
-//!   42 05 | 00 26 09 04 02        2026-09-04
+//!   42 7d | 00 26 09 04 02        2026-09-04
 //! ```
 //!
 //! The two-byte trailer on a timecode record is a microsecond count of how far
@@ -51,8 +66,10 @@
 //! the only rate yet observed; scaling by `fps` rather than hardcoding 40,000 is
 //! reasoning, not evidence.
 //!
-//! On a date record the trailer is instead a fixed `a1 00`, so it means
-//! something else there, and is ignored.
+//! On a date record the trailer means something else, and is ignored. Byte 7 is
+//! always `a1`; byte 8 is `00` in 112 of 124 date records and something else in
+//! the other 12, with no value repeating. Whatever that is, it is not a
+//! microsecond count into a frame — a date record names no frame.
 //!
 //! Alongside the service data — in the same advertisement but a separate field,
 //! and a separate event to a scanner — the device sends a five-byte
@@ -93,6 +110,14 @@ pub const SERVICE_UUID_16: u16 = 0xFDAC;
 
 const KIND_TIMECODE: u8 = 0x22;
 const KIND_DATE: u8 = 0x42;
+
+/// The record type and the flags byte, ahead of the data field.
+const HEADER: usize = 2;
+
+/// How wide the data field is. Fixed, in every record type and every packet
+/// observed — including across a firmware or configuration change that moved
+/// the flags byte. See the module docs for why this isn't read off the wire.
+const DATA_LEN: usize = 5;
 
 /// Timecode as the Tentacle broadcasts it.
 ///
@@ -214,15 +239,17 @@ pub enum Advert {
 /// some other vendor's advertisement as timecode.
 pub fn parse(data: &[u8]) -> Option<Advert> {
     let kind = *data.first()?;
-    let length = *data.get(1)? as usize;
-    let body = data.get(2..2 + length)?;
+    // Byte 1 is skipped, not read as a length — see the module docs. The data
+    // field is at a fixed offset and a fixed width in every packet ever seen,
+    // and deriving it from byte 1 is what blinded this parser once already.
+    let body = data.get(HEADER..HEADER + DATA_LEN)?;
 
     match kind {
         KIND_TIMECODE => {
             let &[fps, hours, minutes, seconds, frames] = body else {
                 return None;
             };
-            let subframe_micros = match data.get(2 + length..) {
+            let subframe_micros = match data.get(HEADER + DATA_LEN..) {
                 Some(&[high, low, ..]) => u16::from_be_bytes([high, low]),
                 _ => 0,
             };
@@ -308,9 +335,26 @@ mod tests {
         (&[0x22, 0x05, 0x19, 0x09, 0x22, 0x32, 0x03, 0x50, 0x56], "09:34:50:03"),
     ];
 
+    /// Payloads captured off the same boxes after they were connected to the
+    /// Tentacle phone app to sync them, which set byte 1 to `0x7d` and stopped
+    /// the scanner decoding anything at all. Same nine-byte shape, same fields
+    /// in the same places — one flag byte moved, and reading it as a length
+    /// threw all of these away.
+    const AFTER_APP_SYNC: &[(&[u8], &str)] = &[
+        (&[0x22, 0x7d, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6], "11:37:40:21"),
+        (&[0x22, 0x7d, 0x19, 0x0b, 0x1d, 0x0a, 0x10, 0x17, 0xc7], "11:29:10:16"),
+        // Byte 1 is not even stable at 0x7d: four packets in a 500 s capture
+        // came through as 0x7c, so a parser that special-cased the new value
+        // would have thrown these away in turn.
+        (&[0x22, 0x7c, 0x19, 0x0b, 0x1e, 0x08, 0x0e, 0x88, 0x11], "11:30:08:14"),
+        // And one from before the sync where the bottom bit had flickered the
+        // other way, at a byte 1 of 0x07.
+        (&[0x22, 0x07, 0x19, 0x0b, 0x1c, 0x1e, 0x10, 0x44, 0x17], "11:28:30:16"),
+    ];
+
     #[test]
     fn parses_captured_timecode() {
-        for (payload, expected) in CAPTURED {
+        for (payload, expected) in CAPTURED.iter().chain(AFTER_APP_SYNC) {
             let Some(Advert::Timecode(tc)) = parse(payload) else {
                 panic!("{payload:02x?} did not parse as timecode");
             };
@@ -320,12 +364,56 @@ mod tests {
     }
 
     #[test]
+    fn byte_one_is_not_a_length() {
+        // The regression. A nine-byte packet decodes the same whatever byte 1
+        // says, because it says nothing about the layout: 0x05 was the old
+        // value, 0x7d the one that arrived after a phone-app sync and blinded
+        // the scanner, 0xff the reductio.
+        for flags in [0x00, 0x05, 0x07, 0x7c, 0x7d, 0xff] {
+            let payload = [0x22, flags, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6];
+            let Some(Advert::Timecode(tc)) = parse(&payload) else {
+                panic!("byte 1 = {flags:#04x} was rejected");
+            };
+            assert_eq!(tc.to_string(), "11:37:40:21");
+            assert_eq!(tc.subframe_micros, 24518);
+        }
+    }
+
+    #[test]
+    fn the_range_checks_carry_the_rejecting_on_their_own() {
+        // Nothing validates byte 1 any more, so the field checks are the only
+        // thing keeping another vendor's 0xFDAC advertisement out of the
+        // display. Same payload as above with one field pushed out of range,
+        // for each field in turn.
+        let good = [0x22u8, 0x7d, 0x19, 0x0b, 0x25, 0x28, 0x15, 0x5f, 0xc6];
+        assert!(parse(&good).is_some());
+        for (byte, bad) in [(2, 0x00), (3, 24), (4, 60), (5, 60), (6, 25)] {
+            let mut payload = good;
+            payload[byte] = bad;
+            assert!(
+                parse(&payload).is_none(),
+                "byte {byte} = {bad:#04x} should have been rejected"
+            );
+        }
+    }
+
+    #[test]
     fn parses_the_captured_date() {
-        let payload = [0x42, 0x05, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0x00];
-        let Some(Advert::Date(date)) = parse(&payload) else {
-            panic!("did not parse as a date");
-        };
-        assert_eq!(date.to_string(), "2026-09-04");
+        // The date record moved its flags byte too, and its trailer's low byte
+        // turns out not to be the constant it looked like — neither is allowed
+        // to matter, since nothing here reads either.
+        let captured: &[&[u8]] = &[
+            &[0x42, 0x05, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0x00],
+            &[0x42, 0x7d, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0x00],
+            &[0x42, 0x7d, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0xf9],
+            &[0x42, 0x7c, 0x00, 0x26, 0x09, 0x04, 0x02, 0xa1, 0x47],
+        ];
+        for payload in captured {
+            let Some(Advert::Date(date)) = parse(payload) else {
+                panic!("{payload:02x?} did not parse as a date");
+            };
+            assert_eq!(date.to_string(), "2026-09-04");
+        }
     }
 
     #[test]

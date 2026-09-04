@@ -90,12 +90,19 @@ claim and what's still unknown — there's a formatted copy at
 spec; `--raw` is how it was worked out. The short version:
 
 ```
-22 05 | 19 09 23 3b 14 | 58 62     fps=25, 09:35:59:20, 22626 µs into the frame
-42 05 | 00 26 09 04 02 | a1 00     2026-09-04
+22 7d | 19 0b 25 28 15 | 5f c6     fps=25, 11:37:40:21, 24518 µs into the frame
+42 7d | 00 26 09 04 02 | a1 00     2026-09-04
 ```
 
-Service UUID `0xFDAC`, nine bytes, a record type and a length ahead of a
+Service UUID `0xFDAC`, nine bytes, a record type and a flags byte ahead of a
 five-byte data field, with a big-endian microsecond counter in the trailer.
+
+Note the layout is **fixed, not self-describing**. Byte 1 held `0x05` in every
+early capture, which is exactly the width of the data field, and reading it as a
+length looked safe for as long as nobody changed it. Syncing the boxes to the
+Tentacle phone app changed it to `0x7d` while the packets stayed nine bytes, at
+which point every advertisement was rejected and the scanner showed an empty
+screen with no explanation. Don't derive the field from it.
 
 Three things to know before extending this. **Discovery has to key on the service
 UUID, not on a name** — the advertised name is whatever the owner called the

@@ -504,8 +504,8 @@ footer {
       Nothing here comes from a published specification.
     </p>
     <div class="masthead-meta">
-      <span><b>Corpus</b> 338 unique payloads, 5 captures, 2 implementations</span>
-      <span><b>Device</b> 25 fps, firmware unknown</span>
+      <span><b>Corpus</b> 2 322 payloads, 8 captures, 2 devices, 2 implementations</span>
+      <span><b>Device</b> 25 fps, firmware unknown, before and after an app sync</span>
       <span><b>Method</b> observation against known timecode</span>
     </div>
   </header>
@@ -664,8 +664,9 @@ footer {
 
       <h3>Packet anatomy</h3>
       <p>
-        Every payload is nine bytes with the same shape: a record type, a length,
-        a five-byte data field, and a two-byte trailer.
+        Every payload is nine bytes with the same shape: a record type, a flags
+        byte, a five-byte data field, and a two-byte trailer. The layout is
+        fixed, not self-describing — see below.
       </p>
 
       <div class="panel">
@@ -675,18 +676,18 @@ footer {
             <div class="bytemap">
               <div class="byterow">
                 <div class="byte r-head"><span class="idx">0</span><span class="hex">22</span></div>
-                <div class="byte r-head"><span class="idx">1</span><span class="hex">05</span></div>
+                <div class="byte r-head"><span class="idx">1</span><span class="hex">7d</span></div>
                 <div class="byte r-data"><span class="idx">2</span><span class="hex">19</span></div>
-                <div class="byte r-data"><span class="idx">3</span><span class="hex">09</span></div>
-                <div class="byte r-data"><span class="idx">4</span><span class="hex">23</span></div>
-                <div class="byte r-data"><span class="idx">5</span><span class="hex">3b</span></div>
-                <div class="byte r-data"><span class="idx">6</span><span class="hex">14</span></div>
-                <div class="byte r-tail"><span class="idx">7</span><span class="hex">58</span></div>
-                <div class="byte r-tail"><span class="idx">8</span><span class="hex">62</span></div>
+                <div class="byte r-data"><span class="idx">3</span><span class="hex">0b</span></div>
+                <div class="byte r-data"><span class="idx">4</span><span class="hex">25</span></div>
+                <div class="byte r-data"><span class="idx">5</span><span class="hex">28</span></div>
+                <div class="byte r-data"><span class="idx">6</span><span class="hex">15</span></div>
+                <div class="byte r-tail"><span class="idx">7</span><span class="hex">5f</span></div>
+                <div class="byte r-tail"><span class="idx">8</span><span class="hex">c6</span></div>
               </div>
               <div class="bracketrow">
                 <div class="bracket b-head">type<small>0x22</small></div>
-                <div class="bracket b-head">len<small>always 5</small></div>
+                <div class="bracket b-head">flags<small>not a length</small></div>
                 <div class="bracket b-data" style="grid-column: 3 / 8">data field<small>five bytes, meaning set by type</small></div>
                 <div class="bracket b-tail" style="grid-column: 8 / 10">trailer<small>big-endian u16</small></div>
               </div>
@@ -694,9 +695,9 @@ footer {
           </div>
           <div class="decoded">
             <span class="lbl">Decodes to</span>
-            <span class="big">09:35:59:20</span>
+            <span class="big">11:37:40:21</span>
             <span>25 fps</span>
-            <span style="color:var(--ink-faint)">+22 626 µs into frame</span>
+            <span style="color:var(--ink-faint)">+24 518 µs into frame</span>
           </div>
         </div>
       </div>
@@ -711,11 +712,48 @@ footer {
               <tr><td class="m">0x42</td><td>Date</td><td class="num">11 of 348</td></tr>
             </tbody>
           </table>
-          <p style="margin-top:14px;font-size:14.5px;color:var(--ink-soft)">
-            Byte 1 was <code>0x05</code> in every packet observed, and every
-            packet was nine bytes. Reading it as a length is an inference that
-            happens to be self-consistent — no packet of another length ever
-            turned up to test it.
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Byte 1 is not a length</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <p>
+            This document said it was, marked <i>inferred</i>, because it held
+            <code>0x05</code> in every packet ever seen — exactly the width of
+            the data field that follows — and no packet of another size had
+            turned up to contradict it. Both halves of that were true and the
+            conclusion was still wrong.
+          </p>
+          <p>
+            The two boxes were then connected to the Tentacle phone app to sync
+            them, and byte 1 came back <code>0x7d</code> on both. The packets
+            stayed nine bytes. A parser reading byte 1 as a length asks for 125
+            bytes of a nine-byte payload, rejects every advertisement, and
+            reports nothing at all — a scanner with no valid readings looks
+            exactly like a scanner with nothing in range.
+          </p>
+          <table>
+            <thead><tr><th></th><th class="m">Byte 1</th><th>Payload size</th></tr></thead>
+            <tbody>
+              <tr><td>Before the app sync</td><td class="m">0x05 ×117, 0x07 ×2</td><td>9 bytes, always</td></tr>
+              <tr><td>After the app sync</td><td class="m">0x7d ×2199, 0x7c ×4</td><td>9 bytes, always</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:14px">
+            Across 2 322 payloads either side of the change the size never
+            moved, so byte 1 does not describe it. <b>Read the layout as fixed:
+            two header bytes, a five-byte data field, an optional two-byte
+            trailer.</b>
+          </p>
+          <p>
+            What byte 1 <i>does</i> mean is unknown. The sync set bits 3–6
+            together (<code>0x05</code> → <code>0x7d</code> is
+            <code>|= 0x78</code>) and the bottom bit or two flicker on their own
+            — two <code>0x07</code> packets before, four <code>0x7c</code>
+            after. That is the shape of a flags byte and not evidence of what it
+            flags, so don't special-case a value: <code>0x7c</code> alone shows
+            that whatever byte 1 is, today's value isn't stable either.
           </p>
         </div>
       </div>
@@ -869,7 +907,7 @@ footer {
             <div class="bytemap">
               <div class="byterow">
                 <div class="byte r-head"><span class="idx">0</span><span class="hex">42</span></div>
-                <div class="byte r-head"><span class="idx">1</span><span class="hex">05</span></div>
+                <div class="byte r-head"><span class="idx">1</span><span class="hex">7d</span></div>
                 <div class="byte r-data"><span class="idx">2</span><span class="hex">00</span></div>
                 <div class="byte r-data"><span class="idx">3</span><span class="hex">26</span></div>
                 <div class="byte r-data"><span class="idx">4</span><span class="hex">09</span></div>
@@ -880,13 +918,13 @@ footer {
               </div>
               <div class="bracketrow">
                 <div class="bracket b-head">type<small>0x42</small></div>
-                <div class="bracket b-head">len<small>5</small></div>
+                <div class="bracket b-head">flags<small>not a length</small></div>
                 <div class="bracket b-data">?<small>always 00</small></div>
                 <div class="bracket b-data">year<small>BCD</small></div>
                 <div class="bracket b-data">month<small>BCD</small></div>
                 <div class="bracket b-data">day<small>BCD</small></div>
                 <div class="bracket b-data">?<small>always 02</small></div>
-                <div class="bracket b-tail" style="grid-column: 8 / 10">constant<small>a1 00</small></div>
+                <div class="bracket b-tail" style="grid-column: 8 / 10">not a counter<small>a1, then usually 00</small></div>
               </div>
             </div>
           </div>
@@ -904,12 +942,23 @@ footer {
       </p>
 
       <div class="evidence">
-        <div class="claim">The trailer here is a constant, not a counter <span class="badge b-measured">Measured</span></div>
+        <div class="claim">The trailer here is not a microsecond count, and not quite a constant either <span class="badge b-measured">Measured</span></div>
         <p>
-          All 11 date records were byte-for-byte identical, trailer included.
-          Whatever bytes 7–8 mean in a timecode record, they mean something else
-          here — or nothing. Bytes 2 and 6 were likewise fixed at <code>00</code>
-          and <code>02</code> and are unexplained.
+          This document said it was a constant, on 11 date records that were
+          byte-for-byte identical. A larger corpus — 124 date records — splits
+          it: byte 7 is <code>a1</code> in all of them, and byte 8 is
+          <code>00</code> in 112 and something else in the remaining 12, with no
+          value repeating (<code>12 1b 33 43 47 54 67 8c a1 b6 f2 f9</code>).
+        </p>
+        <p>
+          So whatever bytes 7–8 are here, they are not the
+          microsecond-into-frame counter of a timecode record — a date record
+          names no frame — and they are not fixed. One byte pinned and the other
+          mostly-but-not-always zero is the signature of a field this corpus is
+          too small to have provoked. Nothing reads it. Bytes 2 and 6 are
+          likewise fixed at <code>00</code> and <code>02</code> and are
+          unexplained — and after byte 1, "fixed" should be read as "not yet
+          seen to move".
         </p>
       </div>
     </section>
@@ -1182,12 +1231,16 @@ model number         six bytes that aren't text, then a NUL</pre>
                 <td>Compare against a device on different firmware, and watch them on one that's charging.</td>
               </tr>
               <tr>
-                <td><b>Date record bytes 2 and 6</b><br><span style="color:var(--ink-soft)">Fixed at <code>00</code> and <code>02</code>, and its trailer is a constant.</span></td>
+                <td><b>Date record bytes 2 and 6</b><br><span style="color:var(--ink-soft)">Fixed at <code>00</code> and <code>02</code>.</span></td>
                 <td>Change the date and see what moves.</td>
               </tr>
               <tr>
-                <td><b>Byte 1 as a length</b><br><span style="color:var(--ink-soft)">Always <code>0x05</code>; the reading is self-consistent but untested.</span></td>
-                <td>Find a record type with a different payload size.</td>
+                <td><b>Date record byte 8</b><br><span style="color:var(--ink-soft)"><code>00</code> in 112 records of 124, and twelve other values once each.</span></td>
+                <td>Capture across a date change and across midnight.</td>
+              </tr>
+              <tr>
+                <td><b>What byte 1's bits mean</b><br><span style="color:var(--ink-soft)">Answered in the negative — it is not a length — but not answered.</span></td>
+                <td>Bits 3–6 went on together when the boxes were synced to the phone app, so toggle app settings one at a time and watch which bit follows. The bottom bits flicker on their own and want a long capture.</td>
               </tr>
             </tbody>
           </table>
