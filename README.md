@@ -1,7 +1,14 @@
 # tentacle
 
-Reads SMPTE LTC timecode from an audio input — e.g. a Tentacle Sync E plugged
-into a Mac.
+Reads timecode off a Tentacle Sync E, two ways: `tentacle` decodes SMPTE LTC
+from an audio input, and `tentacle-ble` reads it out of the device's Bluetooth
+advertisements without pairing.
+
+```
+$ tentacle-ble
+adapter state: PoweredOn — scanning until interrupted
+  09:44:22:13.3    25 fps   Ricki   2026-09-04   -46 dBm
+```
 
 ```
 $ tentacle
@@ -15,6 +22,46 @@ $ tentacle --device external       # pick one by id or by part of its name
 $ tentacle --channel 1             # decode the right channel of a stereo input
 $ tentacle --json                  # one JSON object per frame, for scripting
 ```
+
+## tentacle-ble
+
+The Sync E broadcasts its running timecode continuously, to anyone listening. No
+pairing, no connection, no cable — which makes this the easy route on a Mac, and
+the only one that works with the stock cable.
+
+```
+$ tentacle-ble                      # live timecode from any Tentacle in range
+$ tentacle-ble --name ricki         # pick a device by name
+$ tentacle-ble --json               # one JSON object per reading
+$ tentacle-ble --raw                # dump advertisements, marking changed bytes
+```
+
+The catch is rate. Advertisements arrive one or two times a second, not once per
+frame, so this tells you what time it is — it can't clock anything. The
+sub-frame fraction (the `.3` above) narrows a reading to about ±10 ms, which is
+Bluetooth delivery jitter rather than anything the protocol gets wrong. For
+actually syncing to picture you still want LTC over audio.
+
+macOS will ask for Bluetooth permission the first time.
+
+### The advertisement format
+
+None of this is documented; it's what the bytes did when watched against a
+device whose timecode and date were known. `src/ble.rs` has the details and
+`--raw` is how it was worked out. In short: service UUID `0xFDAC`, nine bytes,
+a record type and a length ahead of a five-byte data field.
+
+```
+22 05 | 19 09 23 3b 14 | 58 62     fps=25, 09:35:59:20, 34.5% into the frame
+42 05 | 00 26 09 04 02 | a1 00     2026-09-04
+```
+
+Timecode is plain binary, not BCD — seconds were seen hitting `0x3b` and rolling
+to `0x00` as the minute advanced. The date is BCD. Worth knowing if you extend
+this: the frame rate arrives as a whole number, so 29.97 and 30 are
+indistinguishable over the air, and no drop-frame flag is broadcast at all. Only
+25 fps has actually been observed, so a device at another rate is the first thing
+to check with `--raw`.
 
 ## Wiring it to a Mac
 
@@ -45,7 +92,7 @@ output level down in the Tentacle app.
 macOS will also ask for microphone permission the first time; without it the
 stream opens but delivers silence.
 
-## How it works
+## How LTC decoding works
 
 LTC packs 80 bits into every video frame, biphase-mark encoded: each bit cell
 opens with a transition, and a `1` adds a second one in the middle. So a `0` is
@@ -78,7 +125,11 @@ like the Tentacle never produces it.
 
 ## Tests
 
-`cargo test` runs the decoder against synthesized LTC from a biphase-mark
+`cargo test` runs the LTC decoder against synthesized audio from a biphase-mark
 encoder in the test module, covering several frame rates and sample rates,
 minute rollover, drop-frame and user bits, an inverted signal, recovery after a
 dropout, arbitrary buffer boundaries, and rejection of silence, tones and noise.
+
+The BLE parser is tested against payloads captured off real hardware, including
+the minute rollover that proves the fields are binary, and a spread of malformed
+packets it has to reject.

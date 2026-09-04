@@ -1,8 +1,6 @@
 //! Reads SMPTE LTC timecode from an audio input — e.g. a Tentacle Sync E
 //! plugged into the headset jack on a Mac.
 
-mod ltc;
-
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -13,7 +11,7 @@ use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, Sample, SampleFormat, SizedSample};
 
-use ltc::{DecodedFrame, LtcDecoder};
+use tentacle::ltc::{DecodedFrame, LtcDecoder};
 
 /// How long without a frame before we call it a signal loss.
 const SIGNAL_TIMEOUT: Duration = Duration::from_millis(500);
