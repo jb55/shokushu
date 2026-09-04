@@ -125,6 +125,11 @@ use std::time::Duration;
 
 use crate::timecode::{Rate, Timecode};
 
+pub mod diagnostics;
+pub mod scan;
+
+pub use scan::{Advertisement, Device, Event, Scanner};
+
 /// The 16-bit service UUID the Tentacle advertises under.
 pub const SERVICE_UUID_16: u16 = 0xFDAC;
 
