@@ -19,6 +19,21 @@
 //! wording is [`describe`], and stays here because it names command-line flags
 //! that only exist here.
 //!
+//! `--drift` adds a column for how far each box's clock runs from this
+//! computer's, which the free-running clock has to measure anyway in order to
+//! extrapolate. It's off by default, and after watching it for seven minutes
+//! against two boxes that is the right default: the figure wandered over -45 to
+//! +48 ppm and never settled, because the ten-second baseline it's measured over
+//! is short against the jitter on the anchors. See
+//! [`Drift`](shokushu::freerun::Drift), which carries the numbers. Reading a
+//! single value as a property of the box in front of you is the mistake this
+//! column invites, so [`drift_column`] marks the two states where it is
+//! especially not one, and the flag stays opt-in.
+//!
+//! Note also what it compares: two free-running oscillators, this host's
+//! included, neither of them a reference. It says the two disagree, never which
+//! of them is right.
+//!
 //! `--raw` turns this back into the reconnaissance tool it started as, dumping
 //! advertisement payloads and marking which bytes changed. That's how the
 //! layout in [`shokushu::ble`] was worked out, and it's the way to work out
@@ -33,7 +48,7 @@ use btleplug::platform::PeripheralId;
 use clap::Parser;
 use shokushu::ble::diagnostics::Diagnosis;
 use shokushu::ble::{self, Advertisement, Date, Event, Scanner};
-use shokushu::freerun::Reading;
+use shokushu::freerun::{Drift, Reading};
 use shokushu::Timecode;
 use uuid::Uuid;
 
@@ -60,6 +75,12 @@ struct Opt {
     /// With --raw, print every advertisement rather than only changed payloads.
     #[arg(short, long)]
     all: bool,
+
+    /// Add a column for how far each device's clock runs from this computer's,
+    /// in ppm. Takes 10s to measure; `~` marks an estimate still converging and
+    /// `!` one the model has stopped believing.
+    #[arg(long)]
+    drift: bool,
 }
 
 /// How often to redraw the live display. Comfortably above any frame rate a
@@ -163,6 +184,7 @@ async fn main() -> Result<()> {
                 &mut notice,
                 opt.name.as_deref(),
                 start.elapsed(),
+                opt.drift,
             ),
             Step::Took(event) if opt.raw => {
                 report_raw(&opt, &mut raw, &scan, start.elapsed().as_secs_f64(), event)
@@ -195,8 +217,14 @@ fn report_json(scan: &Scanner, event: &Event) {
     let Some(device) = scan.device(id) else {
         return;
     };
+    // The drift trio goes on the end and every field before it is untouched,
+    // so anything already reading this keeps working. Unlike the display it is
+    // not behind --drift: a JSON stream is what a few minutes of this gets
+    // analysed from, and a field that has to be asked for is one that turns out
+    // to be missing from the capture you wanted it in.
+    let drift = device.drift();
     println!(
-        r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{},"charging":{}}}"#,
+        r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{},"charging":{},"drift_ppm":{},"drift_clamped":{},"drift_measurements":{}}}"#,
         tc.hours,
         tc.minutes,
         tc.seconds,
@@ -212,6 +240,12 @@ fn report_json(scan: &Scanner, event: &Event) {
         device
             .battery()
             .map_or("null".to_string(), |b| b.charging.to_string()),
+        // Null rather than 0 until a baseline has been measured — see
+        // `drift_column` for why a zero here would be a claim and not a
+        // reading.
+        drift.map_or("null".to_string(), |d| format!("{:.3}", d.ppm)),
+        drift.map_or("null".to_string(), |d| d.clamped.to_string()),
+        drift.map_or("null".to_string(), |d| d.measurements.to_string()),
     );
 }
 
@@ -227,6 +261,11 @@ struct Row {
     date: Option<Date>,
     rssi: Option<i16>,
     battery: Option<ble::Status>,
+    /// `None` until this device has been heard from for long enough to
+    /// measure. Whether the column is drawn at all is --drift's business, not
+    /// this field's: the column has to hold its width from the first redraw,
+    /// or every line shifts sideways ten seconds in.
+    drift: Option<Drift>,
     note: String,
 }
 
@@ -240,6 +279,7 @@ fn render(
     notice: &mut Notice,
     filter: Option<&str>,
     elapsed: Duration,
+    show_drift: bool,
 ) {
     let mut rows = Vec::new();
 
@@ -276,11 +316,12 @@ fn render(
             date: device.date(),
             rssi: device.rssi(),
             battery: device.battery(),
+            drift: device.drift(),
             note,
         });
     }
 
-    let lines = lay_out(rows);
+    let lines = lay_out(rows, show_drift);
 
     // The diagnostic and the display want the same line, so only one of them
     // may hold it. Order matters both ways round: the line has to be given up
@@ -437,7 +478,7 @@ impl Notice {
 /// The order has to come out the same on every redraw. Devices come back in
 /// discovery order, which isn't the order their lines were established in, so
 /// sorting on first-timecode is what keeps two boxes from swapping places.
-fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
+fn lay_out(mut rows: Vec<Row>, show_drift: bool) -> Vec<String> {
     rows.sort_by(|a, b| a.order.cmp(&b.order));
     let name_width = rows
         .iter()
@@ -448,7 +489,7 @@ fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
     rows.iter()
         .map(|r| {
             format!(
-                "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}{}",
+                "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}{}{}",
                 r.tc,
                 tenth(r.tc.subframe_fraction()),
                 r.tc.rate.fps,
@@ -465,10 +506,54 @@ fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
                         if b.charging { " +" } else { "  " }
                     )
                 }),
+                // Width held whether or not there's a figure yet, so the note
+                // after it doesn't walk sideways when one arrives.
+                if show_drift {
+                    format!("   {:>11}", drift_column(r.drift))
+                } else {
+                    String::new()
+                },
                 r.note,
             )
         })
         .collect()
+}
+
+/// One device's clock drift, said in a way that can't be read as more than it
+/// is.
+///
+/// Three things this has to refuse, and all three are the reason the column
+/// isn't just a number:
+///
+/// - **Nothing measured yet.** For the first ten seconds a device is heard from
+///   there is no measurement, only the nominal frame rate being assumed. That
+///   would print as "0 ppm", which reads as a finding — a box in perfect
+///   agreement with this computer — and is nothing of the kind. `— ppm` says
+///   the column exists and has no answer for it.
+/// - **Still converging**, marked `~`. The estimate starts at nominal and walks
+///   a quarter of the way to each measurement, so it approaches the truth from
+///   below over a minute or two. A `~+8 ppm` on its way to 40 is not a
+///   measurement of 8.
+/// - **Not believed**, marked `!`. The last measurement was past the few
+///   hundred ppm the model will accept, so it was clipped. What's printed is
+///   still the smoothed estimate — the mark is there to say the anchors it came
+///   from were rejected, which is the difference between a device that runs at
+///   the cap and a reading that ran off.
+///
+/// Rounded to a tenth of a ppm, which is 8.6 ms a day. That is far finer than
+/// the figure is stable to — measured over seven minutes it moves by tens of
+/// ppm — and the resolution is kept anyway, because watching it move is the
+/// only thing on screen that says how little a single reading is worth.
+fn drift_column(drift: Option<Drift>) -> String {
+    let Some(drift) = drift else {
+        return "— ppm".to_string();
+    };
+    let mark = match (drift.clamped, drift.settling()) {
+        (true, _) => "!",
+        (false, true) => "~",
+        (false, false) => "",
+    };
+    format!("{mark}{:+.1} ppm", drift.ppm)
 }
 
 /// The escape sequence that replaces the `previous` lines on screen with these.
@@ -635,6 +720,7 @@ mod tests {
             date: None,
             rssi: Some(-46),
             battery: Some(ble::Status { battery_percent: 97, charging: false }),
+            drift: None,
             note: String::new(),
         }
     }
@@ -679,8 +765,8 @@ mod tests {
         let ricki = || row((early, "aabbccdd"), "Ricki");
         let bob = || row((late, "00112233"), "Bob");
 
-        let forwards = lay_out(vec![ricki(), bob()]);
-        let backwards = lay_out(vec![bob(), ricki()]);
+        let forwards = lay_out(vec![ricki(), bob()], false);
+        let backwards = lay_out(vec![bob(), ricki()], false);
 
         assert_eq!(forwards, backwards);
         assert!(forwards[0].contains("Ricki"), "{:?}", forwards);
@@ -694,7 +780,7 @@ mod tests {
         let one = || row((at, "00112233"), "Bob");
         let two = || row((at, "aabbccdd"), "Ricki");
 
-        assert_eq!(lay_out(vec![one(), two()]), lay_out(vec![two(), one()]));
+        assert_eq!(lay_out(vec![one(), two()], false), lay_out(vec![two(), one()], false));
     }
 
     #[test]
@@ -709,7 +795,7 @@ mod tests {
         low.name = "Bob".into();
         low.battery = Some(ble::Status { battery_percent: 7, charging: true });
 
-        let lines = lay_out(vec![full, low]);
+        let lines = lay_out(vec![full, low], false);
         assert!(lines[0].contains("100%"), "{:?}", lines[0]);
         assert!(lines[1].contains("  7%"), "{:?}", lines[1]);
         assert_eq!(lines[0].len(), lines[1].len());
@@ -723,7 +809,7 @@ mod tests {
         let mut unplugged = row((at + Duration::from_secs(1), "aabbccdd"), "Bob");
         unplugged.battery = Some(ble::Status { battery_percent: 98, charging: false });
 
-        let lines = lay_out(vec![plugged, unplugged]);
+        let lines = lay_out(vec![plugged, unplugged], false);
         assert!(lines[0].contains("98% +"), "{:?}", lines[0]);
         assert!(!lines[1].contains('+'), "{:?}", lines[1]);
     }
@@ -736,7 +822,7 @@ mod tests {
         let at = Instant::now();
         let mut row = row((at, "00112233"), "Bob");
         row.battery = None;
-        assert!(!lay_out(vec![row])[0].contains('%'));
+        assert!(!lay_out(vec![row], false)[0].contains('%'));
     }
 
     /// The last payload of a device whose wire format has moved.
@@ -851,13 +937,80 @@ mod tests {
         assert_eq!(notice.key, None);
     }
 
+    /// A settled, believed drift figure of `ppm`.
+    fn measured(ppm: f64) -> Option<Drift> {
+        Some(Drift { ppm, clamped: false, measurements: 20 })
+    }
+
+    #[test]
+    fn the_drift_column_is_absent_unless_it_was_asked_for() {
+        let at = Instant::now();
+        let mut r = row((at, "00112233"), "Bob");
+        r.drift = measured(12.4);
+        assert!(!lay_out(vec![r], false)[0].contains("ppm"));
+    }
+
+    #[test]
+    fn an_unmeasured_drift_is_not_reported_as_zero() {
+        // The lie this column exists to avoid. For the first ten seconds the
+        // clock is running at the nominal rate because nothing has measured it
+        // yet, and printing that as "+0.0 ppm" would read as a device in
+        // perfect agreement with this computer.
+        assert_eq!(drift_column(None), "— ppm");
+        assert!(!drift_column(None).contains('0'));
+    }
+
+    #[test]
+    fn a_settled_measurement_is_a_signed_number_and_nothing_else() {
+        assert_eq!(drift_column(measured(12.4)), "+12.4 ppm");
+        assert_eq!(drift_column(measured(-3.0)), "-3.0 ppm");
+    }
+
+    #[test]
+    fn an_estimate_still_converging_is_marked() {
+        // It approaches from below over a minute or two, so an early figure is
+        // a number on its way somewhere rather than a reading.
+        let early = Some(Drift { ppm: 8.0, clamped: false, measurements: 1 });
+        assert_eq!(drift_column(early), "~+8.0 ppm");
+    }
+
+    #[test]
+    fn a_clamped_estimate_is_distinguishable_from_a_real_one_at_the_cap() {
+        // The requirement that made this a column and not a number: a device
+        // genuinely running at the model's limit and a measurement the model
+        // threw out must not print the same.
+        let honest = Drift { ppm: 500.0, clamped: false, measurements: 20 };
+        let refused = Drift { clamped: true, ..honest };
+        assert_ne!(drift_column(Some(honest)), drift_column(Some(refused)));
+        assert_eq!(drift_column(Some(refused)), "!+500.0 ppm");
+
+        // And the refusal outranks the settling mark, since "these anchors were
+        // rejected" is the more important of the two things to say.
+        let both = Drift { clamped: true, measurements: 1, ..honest };
+        assert!(drift_column(Some(both)).starts_with('!'));
+    }
+
+    #[test]
+    fn the_drift_column_holds_its_width_before_it_has_a_figure() {
+        // Ten seconds into every run the first measurement lands. If the column
+        // grew then, every line on screen would shift sideways at once.
+        let at = Instant::now();
+        let mut waiting = row((at, "00112233"), "Bob");
+        waiting.note = "   x".into();
+        let mut knows = Row { drift: measured(-123.4), ..row((at, "00112233"), "Bob") };
+        knows.note = "   x".into();
+
+        let width = |r: Row| lay_out(vec![r], true)[0].chars().count();
+        assert_eq!(width(waiting), width(knows));
+    }
+
     #[test]
     fn the_name_column_is_padded_to_the_widest_name() {
         let at = Instant::now();
         let lines = lay_out(vec![
             row((at, "00112233"), "Bob"),
             row((at + Duration::from_secs(1), "aabbccdd"), "Ricki"),
-        ]);
+        ], false);
 
         // Identical but for the name, so equal length means what follows the
         // name lines up between the two.

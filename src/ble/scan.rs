@@ -60,7 +60,7 @@ use uuid::Uuid;
 
 use crate::ble::{self, diagnostics, Advert, Date, Status};
 use crate::error::{Error, Result};
-use crate::freerun::{FreeRun, Reading};
+use crate::freerun::{Drift, FreeRun, Reading};
 use crate::Timecode;
 
 /// How often to look for a device that's gone quiet.
@@ -251,6 +251,20 @@ impl Device {
     /// it.
     pub fn last_received(&self) -> Option<Timecode> {
         self.clock.last_received()
+    }
+
+    /// How far this box's clock has been measured to run from this host's.
+    ///
+    /// The scanner's clock has to work this out to extrapolate, so it costs
+    /// nothing to ask; see [`Drift`] for what it is and isn't, and note the
+    /// `None` covers a device that hasn't yet been heard from for the ten
+    /// seconds a measurement takes as well as one that isn't a Tentacle at all.
+    ///
+    /// Every device in one scan is measured against the same host clock, which
+    /// is what makes two of them comparable: a drift they share is this
+    /// computer's and a drift where they differ is theirs.
+    pub fn drift(&self) -> Option<Drift> {
+        self.clock.drift()
     }
 
     /// Advertisements taken in from this device, of any kind.

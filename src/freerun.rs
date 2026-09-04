@@ -105,7 +105,10 @@
 //! - **Drift.** Host and Tentacle keep time on separate crystals, so
 //!   extrapolating at exactly the nominal frame rate walks off over a long run.
 //!   The real rate is measured from anchors over a long baseline, bounded to the
-//!   few hundred ppm two crystals can plausibly disagree by.
+//!   few hundred ppm two crystals can plausibly disagree by. That measurement is
+//!   readable — see [`Drift`] — with the caveats that it takes a baseline before
+//!   there is one at all, and that it is a difference between two free-running
+//!   oscillators rather than a reading against any reference.
 //! - **Signal loss.** Extrapolation stops after [`HOLDOVER`] without an
 //!   advertisement, and says so, rather than confidently inventing timecode.
 
@@ -140,17 +143,61 @@ const SNAP: Duration = Duration::from_millis(500);
 pub const HOLDOVER: Duration = Duration::from_secs(5);
 
 /// Baseline for measuring the device's rate against the host clock. Long,
-/// because the measurement divides anchor jitter by it: over 10 s, a
-/// sub-millisecond anchor error is well under 100 ppm, comfortably finer than
-/// the drift being measured.
+/// because the measurement divides anchor jitter by it.
+///
+/// It is not long enough, and this comment used to say otherwise. The claim was
+/// that a sub-millisecond anchor error over 10 s is "well under 100 ppm,
+/// comfortably finer than the drift being measured". The first half is
+/// borderline and the second is backwards. A measurement spans two anchors, so
+/// their errors add in quadrature: the 0.6 ms the `ble` module docs establish
+/// gives about 85 ppm of scatter on a single baseline, which is not finer than
+/// the drift — it is several times coarser.
+///
+/// Measured rather than reasoned, once [`Drift`] made it visible. Over 420 s on
+/// 2026-09-04, two Sync E boxes at 24 fps on macOS, 40 baselines each, the
+/// individual measurements scattered with a standard deviation of 81 ppm on one
+/// box and 102 ppm on the other, spanning -197 to +203 ppm — right where two
+/// sub-millisecond anchor errors predict, and an order of magnitude above the
+/// drift either box turned out to have.
+///
+/// What that costs is accuracy in the *figure*, not in the clock: a rate error
+/// this size is worth about a millisecond across [`HOLDOVER`], and the slew loop
+/// cancels it between adverts. Lengthening the baseline would sharpen the
+/// measurement in proportion, at the cost of taking longer to notice a rate that
+/// actually changed. Nothing has needed that yet.
 const RATE_BASELINE: Duration = Duration::from_secs(10);
 
 /// How much of each rate measurement to believe. The measurement is noisy even
 /// over that baseline, so most of the old estimate is kept.
+///
+/// The caution was warranted and then some — see [`RATE_BASELINE`] for the
+/// scatter actually measured. Over the same 420 s capture this smoothing pulled
+/// a per-baseline spread of 81 and 102 ppm down to 18 and 22 ppm on the
+/// reported estimate, rather better than the 38% a quarter-gain filter gets on
+/// white noise. Consecutive measurements share an endpoint, so one anchor's
+/// error enters two of them with opposite signs, and that anti-correlation is
+/// worth something the white-noise arithmetic doesn't predict.
+///
+/// It is not enough to make the estimate settle. What it does is keep the
+/// clock's own extrapolation steady, which is what it is for.
 const RATE_GAIN: f64 = 0.25;
 
-/// Cap on how far the measured rate may sit from nominal. Two crystals disagree
-/// by tens of ppm; past this it's measurement noise, not drift.
+/// Cap on how far the measured rate may sit from nominal. Past this it's
+/// measurement noise, not drift.
+///
+/// This used to assert that two crystals disagree "by tens of ppm", which is
+/// repeated received wisdom and is not what the two boxes to hand do. Over 420 s
+/// on 2026-09-04, differencing the two devices' estimates baseline by baseline —
+/// which cancels the host clock, since both are measured against it — left
+/// +0.7 ppm mean with a 28 ppm standard deviation over 40 pairs. That bounds
+/// their disagreement at something under 10 ppm rather than establishing it at
+/// tens. Two boxes of one model is a sample of two, and the measurement is too
+/// coarse to resolve tens of ppm even if they were there, so this rules little
+/// out; it just isn't evidence for the claim it used to make.
+///
+/// The cap has never bitten: nothing was clamped in those 80 baselines, and the
+/// noisiest single measurement of the lot reached 203 ppm, so 500 sits about
+/// five standard deviations out. It is a guard on the tail, not a working limit.
 ///
 /// Getting the rate right buys less than it looks like it should — the slew loop
 /// cancels a constant rate error to within a fraction of a millisecond between
@@ -158,6 +205,17 @@ const RATE_GAIN: f64 = 0.25;
 /// which is also why the cap matters: at [`HOLDOVER`], being 500 ppm wrong costs
 /// about a millisecond, so a bad estimate can't do real harm either.
 const MAX_RATE_ERROR: f64 = 500e-6;
+
+/// How many baselines before the rate estimate has mostly left the nominal
+/// frame rate it started from.
+///
+/// Each measurement folds in [`RATE_GAIN`] of itself, so what's left of that
+/// initial guess after `n` of them is `(1 - RATE_GAIN)^n`: a quarter after
+/// five, a tenth after nine. Nine is where [`Drift::settling`] stops saying so
+/// — the point at which under a tenth of the figure still comes from an
+/// assumption rather than from anchors. It is a threshold on convergence, not a
+/// claim that the number stops moving there.
+const SETTLED_MEASUREMENTS: u32 = 9;
 
 /// What the smoothed clock says.
 ///
@@ -188,6 +246,115 @@ pub enum Reading {
     /// a device that's merely quiet look identical, so nothing here decides
     /// which it was.
     Lost { last: Timecode, since: Duration },
+}
+
+/// How fast the device's crystal runs against this host's, in parts per
+/// million.
+///
+/// The clock has to measure this to extrapolate correctly, so it's a
+/// by-product rather than an instrument: it exists because the model needs it,
+/// and it's reported here at whatever quality the model happens to need. Read
+/// it with [`FreeRun::drift`], or off the [`ble`](crate::ble) scanner's
+/// `Device::drift`.
+///
+/// # What it is a difference between
+///
+/// Two free-running oscillators, neither of them a reference. The device's is
+/// whatever crystal is in the box; the host's is whatever [`Instant`] is on
+/// this platform, which on macOS is the raw monotonic counter and so is not
+/// disciplined by NTP. A non-zero figure says the two disagree. It does not say
+/// which of them is wrong, and nothing here can: that would want a reading
+/// against wall-clock time, which is a different measurement.
+///
+/// Two boxes in one scan are measured against the *same* host clock, though, so
+/// a drift they share is common-mode and a difference between them is not.
+///
+/// # It is mostly noise, and that is measured rather than hedged
+///
+/// The first thing this was pointed at was whether it means anything, and on
+/// the hardware to hand it largely doesn't. Over 420 s on 2026-09-04 — two Sync
+/// E boxes at 24 fps, macOS, 40 baselines each — the reported figure did not
+/// settle. It wandered across -45 to +48 ppm with a standard deviation of 18
+/// ppm on one box and 22 on the other, and was still wandering at the end. The
+/// per-baseline measurements underneath it scattered by 81 and 102 ppm.
+///
+/// Both boxes averaged about +11 ppm against this host, which over 39 samples
+/// at that scatter is not distinguishable from zero. Differencing the two —
+/// which cancels the host clock — gave +0.7 ppm, so they are not measurably
+/// different from each other either. The noise comes from the ten-second
+/// baseline being short against the jitter on the anchors either end of it, not
+/// from anything the crystals are doing.
+///
+/// So read a single figure as an order of magnitude at best, and a change in
+/// one over a few baselines as nothing at all. It would take a much longer
+/// baseline, or averaging many of these, to say what a box's crystal is
+/// actually doing. What the number is *sufficient* for is the job it exists to
+/// do, which is keeping extrapolation honest across a five-second gap.
+///
+/// # What it isn't
+///
+/// Not a live number. The estimate moves once per baseline — ten seconds — by
+/// a quarter of the gap, so it approaches the truth over several of those
+/// rather than tracking it. [`settling`](Drift::settling) says while that's
+/// still visibly the case, and [`clamped`](Drift#structfield.clamped) says when
+/// the model has stopped believing the measurement altogether.
+///
+/// Not corrupted by the sub-frame bias in [`ble`](crate::ble), for what it's
+/// worth: that offset is constant, so it cancels out of a difference taken over
+/// a baseline. It spoils absolute phase, not rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Drift {
+    /// Parts per million, signed: positive means the device's clock runs fast
+    /// against this host's.
+    ///
+    /// Bounded by the model rather than by the hardware — see
+    /// [`clamped`](Drift#structfield.clamped) — so a figure near the edge of
+    /// the believed range is the place to be suspicious.
+    pub ppm: f64,
+
+    /// Whether the most recent measurement was clipped for being further from
+    /// nominal than the model will believe.
+    ///
+    /// This is the flag that keeps a refusal from reading as a reading. It
+    /// describes the last measurement rather than `ppm` itself, which is a
+    /// smoothed figure and so sits short of the cap even while every
+    /// measurement is hitting it. What it means is that the anchors over the
+    /// last baseline implied a rate error past a few hundred ppm — which is
+    /// more likely a disturbed measurement than a crystal, and either way is
+    /// not something `ppm` is reporting faithfully.
+    pub clamped: bool,
+
+    /// How many baselines have been folded in. At least one, or there would be
+    /// no `Drift` to hold.
+    ///
+    /// The estimate starts at the nominal frame rate and walks towards what's
+    /// measured, so this is also how much of `ppm` is measurement rather than
+    /// that starting assumption. See [`settling`](Drift::settling).
+    pub measurements: u32,
+}
+
+impl Drift {
+    /// Whether the estimate is still climbing out of the nominal frame rate it
+    /// started from, and so is likely reading low.
+    ///
+    /// The first measurement moves `ppm` only a quarter of the way to what was
+    /// measured, the second a quarter of the rest, and so on. A device that
+    /// really runs 40 ppm fast therefore shows about 10 ppm after ten seconds
+    /// and about 26 after forty, climbing, with nothing wrong. Worth marking as
+    /// provisional rather than quoting.
+    ///
+    /// The threshold is nine baselines — a minute and a half — by which point
+    /// under a tenth of the figure still comes from the starting assumption.
+    /// Convergence is asymptotic, so that is a line drawn across it and not a
+    /// point where anything changes.
+    ///
+    /// `false` means the starting assumption has washed out. It does **not**
+    /// mean the figure has converged on anything: measured over 420 s, it goes
+    /// on wandering by tens of ppm indefinitely. See the [type
+    /// docs](Drift#it-is-mostly-noise-and-that-is-measured-rather-than-hedged).
+    pub fn settling(&self) -> bool {
+        self.measurements < SETTLED_MEASUREMENTS
+    }
 }
 
 /// A local clock anchored to the Tentacle's advertisements.
@@ -247,13 +414,23 @@ impl FreeRun {
     /// `Event::Lost` tell you.
     pub fn anchor(&mut self, tc: &Timecode, at: Instant) {
         let Some(state) = &mut self.state else {
-            self.state = Some(State::new(tc, tc.frame_position(), at, tc.rate.fps as f64));
+            self.state = Some(State::new(
+                tc,
+                tc.frame_position(),
+                at,
+                RateEstimate::nominal(tc.rate),
+            ));
             return;
         };
         if state.frame_rate != tc.rate {
             // Another rate means another device, or one that's been
             // reconfigured; nothing learned so far still applies.
-            self.state = Some(State::new(tc, tc.frame_position(), at, tc.rate.fps as f64));
+            self.state = Some(State::new(
+                tc,
+                tc.frame_position(),
+                at,
+                RateEstimate::nominal(tc.rate),
+            ));
             return;
         }
 
@@ -266,7 +443,7 @@ impl FreeRun {
         // genuine discontinuity. Neither is something to slew towards: reseat on
         // the new reading, keeping the rate, since the crystals didn't change.
         let resumed = at.saturating_duration_since(state.anchored) > HOLDOVER;
-        if resumed || error.abs() > SNAP.as_secs_f64() * state.rate {
+        if resumed || error.abs() > SNAP.as_secs_f64() * state.rate.fps {
             let rate = state.rate;
             self.state = Some(State::new(tc, position, at, rate));
             return;
@@ -336,6 +513,71 @@ impl FreeRun {
     pub fn last_received(&self) -> Option<Timecode> {
         self.state.as_ref().map(|s| s.last)
     }
+
+    /// How far this device's clock has been measured to run from the host's.
+    ///
+    /// `None` until a measurement exists, which is two things at once: a clock
+    /// that has never been anchored, and one that has been anchored but hasn't
+    /// yet seen a full `RATE_BASELINE` — ten seconds — of anchors to measure
+    /// over. Both are reported the same way because in both the honest answer
+    /// is that nothing has been measured. A rate has to be *assumed* before
+    /// then, and it's assumed to be exactly nominal, so quoting it would report
+    /// zero drift for every device in its first ten seconds. That reads as a
+    /// finding and is an artefact.
+    ///
+    /// The count resets with the clock: a device that changes frame rate starts
+    /// over at `None`, since nothing measured about the old configuration
+    /// carries. A device coming back from a dropout keeps what it had learned,
+    /// since its crystal didn't change while the signal was gone — though the
+    /// silence is a gap in the anchors, not a gap in the measurement, so the
+    /// baseline spanning it is a longer and weaker one than the rest.
+    ///
+    /// Cheap and `&self`: it reads the model rather than advancing it, so
+    /// unlike [`sample`](FreeRun::sample) it's safe to call from anywhere.
+    /// There is nothing to gain from calling it per frame, mind — see
+    /// [`Drift`] for why it's a slow number.
+    pub fn drift(&self) -> Option<Drift> {
+        let state = self.state.as_ref()?;
+        (state.rate.measurements > 0).then(|| Drift {
+            ppm: (state.rate.fps / state.frame_rate.fps as f64 - 1.0) * 1e6,
+            clamped: state.rate.clamped,
+            measurements: state.rate.measurements,
+        })
+    }
+}
+
+/// How fast the device runs in host seconds, and how much of that figure has
+/// actually been measured.
+///
+/// The two travel together because they have to survive the same events: a
+/// resumed clock keeps the rate it had learned — the crystals didn't change
+/// while the signal was gone — so it has to keep the provenance too, and a
+/// device at a different frame rate throws both away. Splitting them is how
+/// you end up reporting a measured drift for a clock that has just started
+/// over at nominal.
+#[derive(Debug, Clone, Copy)]
+struct RateEstimate {
+    /// Frames per second of *host* time, as against the frame rate the device
+    /// names, which is `State::frame_rate`.
+    fps: f64,
+    /// Baselines folded in so far. Zero means `fps` is still the nominal rate
+    /// and nothing has been measured, which is why there is no `Drift` to
+    /// report yet.
+    measurements: u32,
+    /// Whether the last measurement was clipped by `MAX_RATE_ERROR`.
+    clamped: bool,
+}
+
+impl RateEstimate {
+    /// The starting guess: the rate the device says it runs at, believed
+    /// exactly, on no evidence at all.
+    fn nominal(rate: Rate) -> RateEstimate {
+        RateEstimate {
+            fps: rate.fps as f64,
+            measurements: 0,
+            clamped: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -348,7 +590,7 @@ struct State {
     /// `rate` frames per second of host time.
     pos: f64,
     at: Instant,
-    rate: f64,
+    rate: RateEstimate,
     /// Highest position handed out so far.
     last_out: f64,
     /// The last advertisement, and when it reached us.
@@ -359,7 +601,7 @@ struct State {
 }
 
 impl State {
-    fn new(tc: &Timecode, position: f64, at: Instant, rate: f64) -> Self {
+    fn new(tc: &Timecode, position: f64, at: Instant, rate: RateEstimate) -> Self {
         State {
             frame_rate: tc.rate,
             pos: position,
@@ -374,7 +616,7 @@ impl State {
 
     /// Where the model says the device is at `now`.
     fn extrapolate(&self, now: Instant) -> f64 {
-        self.pos + secs_between(now, self.at) * self.rate
+        self.pos + secs_between(now, self.at) * self.rate.fps
     }
 
     /// Re-measures how fast the device runs against the host clock, over a
@@ -386,11 +628,19 @@ impl State {
             return;
         }
         let nominal = self.frame_rate.fps as f64;
-        let measured = ((position - from_position) / span).clamp(
+        let (floor, ceiling) = (
             nominal * (1.0 - MAX_RATE_ERROR),
             nominal * (1.0 + MAX_RATE_ERROR),
         );
-        self.rate += RATE_GAIN * (measured - self.rate);
+        let raw = (position - from_position) / span;
+        let measured = raw.clamp(floor, ceiling);
+        self.rate.fps += RATE_GAIN * (measured - self.rate.fps);
+        // Recorded rather than merely applied: a clipped measurement is the
+        // model declining to believe the anchors, and anything reporting the
+        // rate has to be able to say so rather than quote the result as a
+        // reading. See `Drift::clamped`.
+        self.rate.clamped = raw < floor || raw > ceiling;
+        self.rate.measurements += 1;
         self.rate_from = (position, at);
     }
 }
@@ -676,5 +926,115 @@ mod tests {
     fn nothing_to_show_before_the_first_advert() {
         assert!(FreeRun::default().sample(Instant::now()).is_none());
         assert!(FreeRun::default().last_received().is_none());
+        assert!(FreeRun::default().drift().is_none());
+    }
+
+    /// Feeds `seconds` of adverts every 600 ms from a device running `drift`
+    /// times host speed, and hands back the clock.
+    fn run_at(drift: f64, seconds: u64) -> FreeRun {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+        for tick in 0..seconds * 100 {
+            let now = t0 + millis(tick * 10);
+            if tick % 60 == 0 {
+                clock.anchor(&at(10.0 + (tick as f64 / 100.0) * drift), now);
+            }
+        }
+        clock
+    }
+
+    #[test]
+    fn no_drift_figure_until_a_baseline_has_been_measured() {
+        // Nine seconds of anchors is not a measurement, and the rate the clock
+        // is using in the meantime is the nominal one — so reporting it would
+        // say "0 ppm", which is a lie of exactly the kind an Option exists to
+        // refuse.
+        assert!(run_at(1.0, 9).drift().is_none());
+
+        let drift = run_at(1.0, 11).drift().expect("a baseline has gone by");
+        assert_eq!(drift.measurements, 1);
+        assert!(drift.settling(), "one baseline in is not settled");
+    }
+
+    #[test]
+    fn measures_a_device_that_runs_fast() {
+        // 200 ppm, no jitter, five minutes: thirty baselines, by which point
+        // essentially none of the nominal starting guess is left. This is the
+        // arithmetic working, not a claim about hardware.
+        let drift = run_at(1.0 + 200e-6, 300).drift().expect("well past one");
+        assert!(
+            (drift.ppm - 200.0).abs() < 1.0,
+            "measured {} ppm where the device ran 200",
+            drift.ppm
+        );
+        assert!(!drift.clamped, "200 ppm is inside what the model believes");
+        assert!(!drift.settling(), "thirty baselines in");
+    }
+
+    #[test]
+    fn the_estimate_reads_low_while_it_is_still_settling() {
+        // The reason `settling` exists: one baseline in, a device running 200
+        // ppm fast reports about 50, and nothing is wrong. Quoting that figure
+        // without saying it is provisional is quoting a quarter of the answer.
+        let drift = run_at(1.0 + 200e-6, 11).drift().expect("one baseline");
+        assert!(drift.settling());
+        assert!(
+            drift.ppm < 100.0,
+            "expected the first fold to land well short of 200, got {}",
+            drift.ppm
+        );
+    }
+
+    #[test]
+    fn a_measurement_past_what_the_model_believes_says_so() {
+        // 2000 ppm is four times the cap, so every measurement is clipped. The
+        // reported figure has to be flagged rather than passed off as a reading
+        // — the whole point being that it is distinguishable from a device that
+        // genuinely runs at the cap.
+        let drift = run_at(1.0 + 2000e-6, 120).drift().expect("twelve baselines");
+        assert!(drift.clamped, "every measurement here ran past MAX_RATE_ERROR");
+        assert!(
+            drift.ppm <= MAX_RATE_ERROR * 1e6 + 1e-6,
+            "the estimate escaped the cap at {} ppm",
+            drift.ppm
+        );
+
+        // And a device inside the cap is not flagged, so the flag means
+        // something.
+        assert!(!run_at(1.0 + 100e-6, 120).drift().unwrap().clamped);
+    }
+
+    #[test]
+    fn a_change_of_frame_rate_forgets_what_was_measured() {
+        let t0 = Instant::now();
+        let mut clock = FreeRun::default();
+        for tick in 0..3_000_u64 {
+            let now = t0 + millis(tick * 10);
+            if tick % 60 == 0 {
+                clock.anchor(&at(10.0 + (tick as f64 / 100.0) * (1.0 + 200e-6)), now);
+            }
+        }
+        assert!(clock.drift().is_some());
+
+        // Another rate is another device or a reconfigured one; the rate
+        // learned about the old one is not evidence about this one.
+        let thirty = Timecode::at_frame_position(10.0 * 30.0, Rate::whole(30));
+        clock.anchor(&thirty, t0 + millis(30_000));
+        assert!(clock.drift().is_none(), "kept a measurement across a rate change");
+    }
+
+    #[test]
+    fn coming_back_from_a_dropout_keeps_the_measurement() {
+        // The crystals didn't change while the signal was gone, so neither the
+        // rate nor the standing it has earned should be thrown away — a box
+        // that blinks out for a few seconds shouldn't go back to "unmeasured".
+        let mut clock = run_at(1.0 + 200e-6, 300);
+        let before = clock.drift().expect("measured");
+
+        let t1 = Instant::now() + Duration::from_secs(3600);
+        clock.anchor(&at(20.0), t1);
+        let after = clock.drift().expect("still measured after a long silence");
+        assert_eq!(after.measurements, before.measurements);
+        assert!((after.ppm - before.ppm).abs() < 1e-9);
     }
 }
