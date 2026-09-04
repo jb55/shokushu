@@ -63,6 +63,16 @@ retransmits the same PDU on each of the three primary advertising channels, and 
 scanner that catches more than one copy reports it more than once. **De-duplicate
 on payload equality**, or your apparent rate is double the real one.
 
+Capture C, collected by a second implementation that hadn't seen the first, puts
+the copies-per-reading count at {2: 53, 3: 2} over 55 distinct readings: no
+singletons, and two readings that arrived three times. Across both captures, 125
+of 130 readings arrived exactly twice, 2 three times and 3 once. That
+distribution is itself the evidence for the three-channel explanation, since a
+device that simply transmitted everything twice could never produce a 3. It also
+sets the shape of the de-duplication: **compare payloads, don't assume pairs** —
+a reader that discards every second advertisement desynchronises permanently on
+the first triple it meets.
+
 **Reception is bursty.** [measured] Gaps between *fresh* readings, three captures
 with the device on a desk at −46 dBm:
 
