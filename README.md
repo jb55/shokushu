@@ -32,15 +32,32 @@ the only one that works with the stock cable.
 ```
 $ tentacle-ble                      # live timecode from any Tentacle in range
 $ tentacle-ble --name ricki         # pick a device by name
-$ tentacle-ble --json               # one JSON object per reading
+$ tentacle-ble --json               # one JSON object per advert, uninterpolated
 $ tentacle-ble --raw                # dump advertisements, marking changed bytes
 ```
 
-The catch is rate. Advertisements arrive one or two times a second, not once per
-frame, so this tells you what time it is — it can't clock anything. The
-sub-frame fraction (the `.3` above) narrows a reading to about ±10 ms, which is
-Bluetooth delivery jitter rather than anything the protocol gets wrong. For
-actually syncing to picture you still want LTC over audio.
+The display free-runs between advertisements. They arrive only one or two times
+a second, so waiting for them meant the timecode jumped a dozen frames at a
+time; instead each one anchors a local clock and the display is redrawn at the
+frame rate, ticking the way a timecode display should. Anchoring is smoothed,
+since snapping to every packet would let the display tick backwards, and it
+never does. If nothing arrives for five seconds it stops rather than inventing
+frames, and says so:
+
+```
+  10:03:40:16.8     25 fps   Ricki   2026-09-04   -46 dBm   no signal for 4.2s
+```
+
+Worth being clear about: interpolating makes the display *smooth*, not more
+*accurate*. It adds no information the advertisements didn't carry. `--json` is
+left alone for that reason — it emits the readings that actually arrived, and
+nothing interpolated.
+
+The accuracy comes from the sub-frame field instead: it's a microsecond counter,
+which places a reading to about 0.6 ms where the frame number alone manages
+13 ms. What can't be done from here is clocking anything — one or two readings a
+second tells you what time it is, and for syncing to picture you still want LTC
+over audio.
 
 macOS will ask for Bluetooth permission the first time.
 
@@ -52,9 +69,18 @@ device whose timecode and date were known. `src/ble.rs` has the details and
 a record type and a length ahead of a five-byte data field.
 
 ```
-22 05 | 19 09 23 3b 14 | 58 62     fps=25, 09:35:59:20, 34.5% into the frame
+22 05 | 19 09 23 3b 14 | 58 62     fps=25, 09:35:59:20, 22626 µs into the frame
 42 05 | 00 26 09 04 02 | a1 00     2026-09-04
 ```
+
+The trailer on a timecode record is that microsecond counter, big-endian. Three
+captures put the scale at 1 MHz: the values span about 39,900 of the 65,536 a
+full-scale fraction would fill, 40,000 µs is exactly one frame at 25 fps, and
+free-fitting the scale against host arrival times lands within a couple of
+percent of it every time. Reading it as a fraction over 65,536 — which is what
+this originally did — fits five times worse. It carries a fixed bias of a few
+milliseconds, so it isn't literally microseconds since the frame boundary;
+nothing corrects for that, since it cancels between readings.
 
 Timecode is plain binary, not BCD — seconds were seen hitting `0x3b` and rolling
 to `0x00` as the minute advanced. The date is BCD. Worth knowing if you extend
@@ -132,4 +158,9 @@ dropout, arbitrary buffer boundaries, and rejection of silence, tones and noise.
 
 The BLE parser is tested against payloads captured off real hardware, including
 the minute rollover that proves the fields are binary, and a spread of malformed
-packets it has to reject.
+packets it has to reject. The free-running clock is tested against synthesized
+anchors: that it walks every frame between two adverts, never goes backwards
+under jitter far worse than reception really is, stays inside a frame of a
+device whose crystal drifts, reports signal loss instead of extrapolating
+through it, and snaps rather than slews when the timecode is changed on the
+device.
