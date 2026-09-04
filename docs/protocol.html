@@ -125,7 +125,6 @@ a:focus-visible, button:focus-visible {
 }
 @media (min-width: 1100px) {
   .shell { grid-template-columns: 210px minmax(0, 1fr); }
-  .toc-col { display: block; }
 }
 
 .col { min-width: 0; max-width: 760px; }
@@ -178,6 +177,9 @@ h1 {
 /* ---------- toc ---------- */
 
 .toc-col { display: none; }
+@media (min-width: 1100px) {
+  .toc-col { display: block; }
+}
 .toc {
   position: sticky;
   top: 28px;
@@ -499,13 +501,14 @@ footer {
     </div>
     <h1>Tentacle Sync E Protocol</h1>
     <p class="standfirst">
-      How to read timecode off a Tentacle Sync E three ways — from its Bluetooth
-      advertisements, from LTC on an audio input, and not at all over USB.
-      Nothing here comes from a published specification.
+      How to read timecode off a Tentacle Sync E four ways — from its Bluetooth
+      advertisements, from the vendor GATT service, from LTC on an audio input,
+      and not at all over USB. Nothing here comes from a published
+      specification.
     </p>
     <div class="masthead-meta">
-      <span><b>Corpus</b> 2 322 payloads, 8 captures, 2 devices, 2 implementations</span>
-      <span><b>Device</b> 25 fps, firmware unknown, before and after an app sync</span>
+      <span><b>Corpus</b> 2 322 advertisements + 8 230 notifications, 2 devices, 2 implementations</span>
+      <span><b>Device</b> 25 and 24 fps, firmware H: 1.1.5 BT: 2.4.2, across two app syncs</span>
       <span><b>Method</b> observation against known timecode</span>
     </div>
   </header>
@@ -514,17 +517,18 @@ footer {
     <nav class="toc">
       <div class="toc-title">Contents</div>
       <ol>
-        <li><a href="#transports"><span class="n">01</span>Three transports</a></li>
+        <li><a href="#transports"><span class="n">01</span>Four transports</a></li>
         <li><a href="#ble"><span class="n">02</span>BLE advertisements</a></li>
         <li><a href="#timecode"><span class="n">03</span>Timecode record</a></li>
         <li><a href="#subframe"><span class="n">04</span>The microsecond field</a></li>
         <li><a href="#date"><span class="n">05</span>Date record</a></li>
         <li><a href="#mfr"><span class="n">06</span>Manufacturer data</a></li>
         <li><a href="#gatt"><span class="n">07</span>GATT services</a></li>
-        <li><a href="#ltc"><span class="n">08</span>LTC over audio</a></li>
-        <li><a href="#usb"><span class="n">09</span>USB</a></li>
-        <li><a href="#method"><span class="n">10</span>Method</a></li>
-        <li><a href="#open"><span class="n">11</span>Open questions</a></li>
+        <li><a href="#vendor-gatt"><span class="n">08</span>The vendor GATT service</a></li>
+        <li><a href="#ltc"><span class="n">09</span>LTC over audio</a></li>
+        <li><a href="#usb"><span class="n">10</span>USB</a></li>
+        <li><a href="#method"><span class="n">11</span>Method</a></li>
+        <li><a href="#open"><span class="n">12</span>Open questions</a></li>
       </ol>
     </nav>
   </div>
@@ -539,7 +543,7 @@ footer {
     </div>
 
     <section id="transports">
-      <h2><span class="n">01</span> Three transports</h2>
+      <h2><span class="n">01</span> Four transports</h2>
       <div class="section-rule"></div>
       <p>
         The device exposes timecode over Bluetooth and over analogue audio. It
@@ -558,6 +562,12 @@ footer {
                 <td class="m">~1.4–1.8 / s</td>
                 <td>&lt;1 ms per packet</td>
                 <td>Always on, no pairing</td>
+              </tr>
+              <tr>
+                <td><b>BLE GATT notifications</b></td>
+                <td class="m">~25 / s, every frame</td>
+                <td>~20 µs consistency</td>
+                <td>Needs a connection, which lasts 7 s</td>
               </tr>
               <tr>
                 <td><b>LTC on audio out</b></td>
@@ -747,15 +757,69 @@ footer {
             trailer.</b>
           </p>
           <p>
-            What byte 1 <i>does</i> mean is unknown. The sync set bits 3–6
-            together (<code>0x05</code> → <code>0x7d</code> is
-            <code>|= 0x78</code>) and the bottom bit or two flicker on their own
-            — two <code>0x07</code> packets before, four <code>0x7c</code>
-            after. That is the shape of a flags byte and not evidence of what it
-            flags, so don't special-case a value: <code>0x7c</code> alone shows
-            that whatever byte 1 is, today's value isn't stable either.
+            What byte 1 <i>does</i> mean was left open here as "the shape of a
+            flags byte and not evidence of what it flags". One of the bits is
+            now pinned and the rest are at least bounded — see below.
           </p>
         </div>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Bit 0 clear means a central holds a GATT connection <span class="badge b-measured">Measured</span></div>
+        <p>
+          This document previously put the <code>0x7c</code> packets down to the
+          bottom bits "flickering on their own". They weren't flickering —
+          something was connected. Tested three times with the two boxes swapping
+          roles, watching both while connecting to one:
+        </p>
+        <div class="scroll-x" style="margin:14px 0">
+          <table style="min-width:520px">
+            <thead><tr><th>Subject</th><th class="m">Byte 1 while connected</th><th class="num">Flipped back at</th><th>Control box</th></tr></thead>
+            <tbody>
+              <tr><td>Ricki</td><td class="m">0x7c ×12</td><td class="num m">7.1 s</td><td class="m">Liliana 0x7d ×341, no change</td></tr>
+              <tr><td>Liliana</td><td class="m">0x7c ×10</td><td class="num m">8.2 s</td><td class="m">Ricki 0x7d ×28, no change</td></tr>
+              <tr><td>Liliana</td><td class="m">0x7c ×2</td><td class="num m">8.3 s</td><td class="m">Ricki 0x7d ×23, no change</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The subject dropped bit 0 for exactly as long as the connection lasted
+          and set it again when the box hung up — and the flip-back time matches
+          the independently measured connection life of about 6.6 s plus the time
+          to connect, every time. The control never moved. The subject-side
+          counts are small (2 to 12 packets) because a connected box advertises
+          less, which is itself worth knowing.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Bits 3–6 move while the app configures a box, and settle back <span class="badge b-unknown">Unknown</span></div>
+        <p>
+          A sync was performed from the phone app while a passive scanner watched
+          both boxes:
+        </p>
+        <pre>Ricki     0x7d -> 0x7c -> 0x15 -> 0x3d -> (30 s) -> 0x55 -> 0x7d
+Liliana   0x7d ---------------> 0x3d -> (32 s) ----------> 0x7d</pre>
+        <p>
+          Both ended where they started. The intermediate values are not a
+          monotonic progression — bits 3 and 5 go off at <code>0x55</code> after
+          being on at <code>0x3d</code> — so this is not a progress counter being
+          filled in. Note the first step on Ricki is <code>0x7c</code>: the app
+          connected, which is bit 0 doing what bit 0 does.
+        </p>
+        <p>
+          Every value ever observed, for whatever it is worth: <code>0x05</code>,
+          <code>0x07</code>, <code>0x15</code>, <code>0x3d</code>,
+          <code>0x55</code>, <code>0x7c</code>, <code>0x7d</code>. <b>Bit 2 is
+          set in all seven.</b> Bit 1 has been seen set only in
+          <code>0x07</code>. And the payload stayed nine bytes through every one
+          of them, which is byte 1 failing to be a length for the third separate
+          time.
+        </p>
+        <p>
+          So: read bit 0 if you want to know whether something is connected, and
+          do not special-case the byte as a whole.
+        </p>
       </div>
     </section>
 
@@ -769,7 +833,7 @@ footer {
           <table style="min-width:600px">
             <thead><tr><th class="m">Byte</th><th>Field</th><th>Encoding</th><th>Observed</th><th>Confidence</th></tr></thead>
             <tbody>
-              <tr><td class="m">2</td><td>Frame rate</td><td>Binary, whole fps</td><td class="m">25 only</td><td><span class="badge b-inferred">Inferred</span></td></tr>
+              <tr><td class="m">2</td><td>Frame rate</td><td>Binary, whole fps</td><td class="m">25 and 24</td><td><span class="badge b-measured">Measured</span></td></tr>
               <tr><td class="m">3</td><td>Hours</td><td>Binary</td><td class="m">9 only</td><td><span class="badge b-inferred">Inferred</span></td></tr>
               <tr><td class="m">4</td><td>Minutes</td><td>Binary</td><td class="m">0–59</td><td><span class="badge b-measured">Measured</span></td></tr>
               <tr><td class="m">5</td><td>Seconds</td><td>Binary</td><td class="m">0–59, all 60</td><td><span class="badge b-measured">Measured</span></td></tr>
@@ -802,8 +866,19 @@ footer {
         <div class="claim">Frames run 0 to fps−1 <span class="badge b-measured">Measured</span></div>
         <p>
           All 25 values from <code>0x00</code> to <code>0x18</code> appeared and
-          none above, against a frame-rate byte of 25. That agreement is also the
-          main support for reading byte 2 as the frame rate at all.
+          none above, against a frame-rate byte of 25.
+        </p>
+        <p>
+          That agreement used to be the main support for reading byte 2 as the
+          frame rate at all, which made it an inference from a single rate. It
+          isn't any more. The user set both boxes to 24 fps from the Tentacle
+          app, and byte 2 went <code>0x19</code> → <code>0x18</code> on both
+          while the frames field started topping out at 23 instead of 24 — all
+          24 values <code>0x00</code>–<code>0x17</code> and none above, over
+          4,542 readings. Two rates, two boxes, the frame ceiling following the
+          byte both times. <b>Byte 2 is the frame rate.</b> The detail is in
+          <a href="#vendor-gatt">section 08</a>, where the same change also
+          settles the microsecond scaling.
         </p>
       </div>
     </section>
@@ -884,12 +959,29 @@ footer {
         </p>
       </div>
 
-      <p>
-        The scaling by frame rate is an inference. Only a 25 fps device was
-        observed, so “1 000 000 ÷ fps microseconds per frame” is the natural
-        reading of a 1 MHz counter rather than something demonstrated at a second
-        rate. Scale by fps rather than hardcoding 40 000.
-      </p>
+      <div class="evidence">
+        <div class="claim">Scaling by frame rate is measured, not inferred any more <span class="badge b-measured">Measured</span></div>
+        <p>
+          This said, correctly at the time, that “1 000 000 ÷ fps microseconds
+          per frame” was the natural reading of a 1 MHz counter and not something
+          demonstrated at a second rate, because only a 25 fps device had ever
+          been seen.
+        </p>
+        <p>
+          A second rate has now been seen. At 24 fps the trailer's observed span
+          grew from 39,705 to 41,646, against frame periods of 40,000 and
+          41,667 µs — it tracked the frame rate to within 0.05%. A
+          fraction-of-a-frame field could not do that, since it would span the
+          same fraction of 65,536 at any rate. <b>Scale by fps; do not hardcode
+          40 000.</b> Evidence in <a href="#vendor-gatt">section 08</a>.
+        </p>
+        <p>
+          Note what did <em>not</em> scale: the few-millisecond bias above stayed
+          at about 3.6 ms at both rates rather than growing with the frame
+          period, so it is an absolute offset in the counter's origin and not a
+          fixed fraction of a frame.
+        </p>
+      </div>
     </section>
 
     <section id="date">
@@ -1005,22 +1097,30 @@ Liliana   02 00 61 01 13      0x61 =  97</pre>
         <p>
           This one was tested properly, because unlike a discharge it needs no
           patience — the intervention is a cable. One box was plugged into USB-C
-          and pulled out again, twice, while the other sat on battery as a
-          control:
+          and pulled out again three times over an hour, while the other sat on
+          battery as a control. Every manufacturer record from both boxes was
+          captured throughout (26,401 of them); these are all the changes:
         </p>
-        <pre>[  1.3s] Liliana   02 02 e4 01 13      charging
-[ 19.9s] Liliana   02 02 64 01 13      unplugged
-[103.3s] Liliana   02 02 e4 01 13      charging again
-[114.7s] Liliana   02 02 64 01 13      unplugged again
-         Ricki     02 00 64 01 13      control, unchanged throughout</pre>
+        <pre>   0.1s  Liliana   02 00 60 01 13      96%, on battery
+ 465.5s  Liliana   02 00 e0 01 13      plugged in — bit 7 up, still 96%
+ 557.1s  Liliana   02 00 e1 01 13      97%
+ 574.3s  Liliana   02 02 e1 01 13      byte 1 changes, 109 s late (see below)
+ 603.6s  Liliana   02 02 e2 01 13      98%
+ 650.3s  Liliana   02 02 e3 01 13      99%
+ 696.2s  Liliana   02 02 e4 01 13      100%
+ 738.2s  Liliana   02 02 64 01 13      unplugged — bit 7 down
+ 821.6s  Liliana   02 02 e4 01 13      plugged in again
+ 833.0s  Liliana   02 02 64 01 13      unplugged
+1677.2s  Liliana   02 02 e4 01 13      and again
+1715.8s  Liliana   02 02 64 01 13      unplugged
+         Ricki     02 00 64 01 13      control: not one change in the hour</pre>
         <p>
-          Bit 7 went up on plug-in and down on unplug, both times, on the
+          Bit 7 went up on plug-in and down on unplug, all three times, on the
           charging box and never on the control. Meanwhile the low seven bits
-          climbed: 96 on battery before the cable went in, then 98, 99 and 100
-          while it was charging. (97 was not seen, but the capture didn't start
-          until after the plug-in, so it was most likely missed rather than
-          skipped.) That independently confirms the low bits are a charge level,
-          and settles that the gauge tracks upwards as well as down.
+          climbed 96 → 97 → 98 → 99 → 100, one at a time with none skipped, over
+          the 231 s the cable was in on the first cycle. That independently
+          confirms the low bits are a charge level, and settles that the gauge
+          tracks upwards as well as down.
         </p>
         <pre>0x60   0 1100000      96%, on battery
 0xe2   1 1100010      98%, charging</pre>
@@ -1050,15 +1150,22 @@ Liliana   02 00 61 01 13      0x61 =  97</pre>
       </div>
 
       <div class="evidence">
-        <div class="claim">Byte 1 latches on something, and it isn't charging <span class="badge b-unknown">Unknown</span></div>
+        <div class="claim">Byte 1 latches on something, and it isn't the charger <span class="badge b-unknown">Unknown</span></div>
         <p>
-          It read <code>0x00</code> on both boxes for every capture until one was
-          first plugged in, when it became <code>0x02</code> — and then stayed
-          <code>0x02</code> through both unplugs, while bit 7 of the battery byte
-          came straight back down each time. So it isn't a charging flag; it is
-          something that got set and did not reset within the observation. “Has
-          been on a charger since boot” would fit, and so would several other
-          things. The control box, never charged, still reads <code>0x00</code>.
+          It read <code>0x00</code> on both boxes for every capture until the
+          first charge, when it became <code>0x02</code> and stayed there —
+          through all three unplugs and to the end of the hour, while bit 7 came
+          straight back down each time.
+        </p>
+        <p>
+          The timing rules out the obvious reading. Byte 1 did not change when the
+          cable went in: bit 7 flipped at 465.5 s and byte 1 was still
+          <code>0x00</code> at 557.1 s, by which point the battery had already
+          gained a percent. It changed at 574.3 s, <b>109 seconds after charging
+          began</b>, and never moved again. So it is not a charger-detect line,
+          and not simply a slower copy of bit 7. Something a minute or two into a
+          charge sets it, and nothing in the following seventeen minutes cleared
+          it. The control box, never charged, still reads <code>0x00</code>.
         </p>
       </div>
 
@@ -1103,10 +1210,12 @@ Liliana   02 00 61 01 13      0x61 =  97</pre>
 0dab17e4-2cb9-11e6-b67b-9e71128cae77   WRITE
 0dab2496-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY</pre>
       <p>
-        The vendor characteristics are unexamined. Reading one is harmless
-        enough, but the write is presumably how the Tentacle app sets a device's
-        time and name, and poking at it blind is how a box ends up needing a
-        factory reset.
+        The three notifying characteristics are decoded in
+        <a href="#vendor-gatt">section 08</a>; <code>0dab144c</code> turns out to
+        carry the timecode at the frame rate, which is fifteen times the
+        advertisement's. The write is still untouched — it is presumably how the
+        Tentacle app sets a device's time and name, and poking at it blind is how
+        a box ends up needing a factory reset.
       </p>
       <p>Device Information reads, identically on both units:</p>
       <pre>manufacturer name    "Tentacle Sync GmbH"
@@ -1127,8 +1236,420 @@ model number         six bytes that aren't text, then a NUL</pre>
       </div>
     </section>
 
+    <section id="vendor-gatt">
+      <h2><span class="n">08</span> The vendor GATT service</h2>
+      <div class="section-rule"></div>
+      <p>
+        The <code>0xfdac</code> service is the same 16-bit UUID the timecode is
+        advertised under, so the broadcast and this service are one service seen
+        from two sides. That prior turned out to be right: what the service
+        pushes is the timecode record with its header taken off, and much faster.
+      </p>
+      <p>
+        Everything in this section is read-only. <b>Nothing was written to any
+        characteristic</b> — see <a href="#write-char">the write
+        characteristic</a> below for why, and for what it would take.
+      </p>
+      <p>
+        Corpus: 8,230 notifications over 380 s of wall clock, about 250 s of it
+        actually connected, from one box, plus shorter runs on the second, at
+        <b>two</b> frame rates. That is the first time anything in this document
+        has seen a second rate.
+      </p>
+
+      <h3>Connections last about seven seconds</h3>
+      <div class="evidence">
+        <div class="claim">The box hangs up on its own, after around 6.6 s <span class="badge b-measured">Measured</span></div>
+        <p>
+          This is the first thing to know about the service, because it shapes
+          everything else.
+        </p>
+        <div class="scroll-x" style="margin:14px 0">
+          <table style="min-width:460px">
+            <thead><tr><th>Run</th><th class="num">Sessions</th><th>Link life</th></tr></thead>
+            <tbody>
+              <tr><td>Ricki, 25 fps, subscribed</td><td class="num">17</td><td class="m">4.44–6.81 s, mean 6.61 s</td></tr>
+              <tr><td>Ricki, 24 fps, subscribed</td><td class="num">21</td><td class="m">3.27–6.81 s, mean 6.59 s</td></tr>
+              <tr><td>Liliana, subscribed</td><td class="num">2 runs</td><td class="m">6.70 s, 6.75 s</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <b>It is not the traffic.</b> The obvious explanation is that
+          notifications at 33/s overrun something. They don't: a session
+          subscribed to nothing at all, doing one read a second, died just the
+          same — last successful read at 6.2 s, first failure at 7.1 s. Both
+          boxes do it, so it is not one unit. A client that does nothing and a
+          client taking 220 notifications get the same seven seconds, which is
+          the signature of a timer and not of flow control.
+        </p>
+        <p>
+          <b>Scanning while connected makes it worse.</b> With the scan held up
+          through the connect, service discovery itself failed every time — the
+          link died before a single characteristic could be read. Restarted
+          after subscribing, the usual seven seconds. So the advertisement can
+          be watched <em>or</em> the service can be, and a tool that wants both
+          gets a much shorter look at the second.
+        </p>
+      </div>
+      <p>
+        The practical consequence: <b>anything that wants a sustained stream off
+        this service has to reconnect continuously.</b> That gets 17 to 21
+        connections a minute. Whether the app avoids this by writing a keepalive
+        is a reasonable guess and nothing more; it is the sort of thing the write
+        characteristic might be for.
+      </p>
+
+      <h3><code>0dab144c</code> — the timecode, headerless</h3>
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Notification · 0dab144c</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <div class="scroll-x">
+            <div class="bytemap">
+              <div class="byterow" style="grid-template-columns: repeat(7, 1fr)">
+                <div class="byte r-data"><span class="idx">0</span><span class="hex">19</span></div>
+                <div class="byte r-data"><span class="idx">1</span><span class="hex">0c</span></div>
+                <div class="byte r-data"><span class="idx">2</span><span class="hex">24</span></div>
+                <div class="byte r-data"><span class="idx">3</span><span class="hex">33</span></div>
+                <div class="byte r-data"><span class="idx">4</span><span class="hex">05</span></div>
+                <div class="byte r-tail"><span class="idx">5</span><span class="hex">67</span></div>
+                <div class="byte r-tail"><span class="idx">6</span><span class="hex">51</span></div>
+              </div>
+              <div class="bracketrow" style="grid-template-columns: repeat(7, 1fr)">
+                <div class="bracket b-data" style="grid-column: 1 / 6">data field<small>fps, hours, minutes, seconds, frames</small></div>
+                <div class="bracket b-tail" style="grid-column: 6 / 8">trailer<small>microseconds, big-endian u16</small></div>
+              </div>
+            </div>
+          </div>
+          <div class="decoded">
+            <span class="lbl">Decodes to</span>
+            <span class="big">12:36:51:05</span>
+            <span>25 fps</span>
+            <span style="color:var(--ink-faint)">+26 449 µs into frame</span>
+          </div>
+        </div>
+      </div>
+      <p>
+        Seven bytes: the advertisement's timecode record with the two header
+        bytes removed. The same five fields in the same order with the same
+        encoding as bytes 2–6 of a <code>0x22</code> advertisement, and the same
+        trailer as bytes 7–8. No record type, no flags byte. Every payload in the
+        corpus was seven bytes — 8,230 of them across two frame rates, with no
+        other length and no date record ever appearing here.
+      </p>
+      <p>
+        The field boundaries fall out of how fast each byte moves, which is the
+        method the advertisement was decoded with. Over one 180 s run:
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:420px">
+          <thead><tr><th class="m">Byte</th><th class="num">Distinct values</th><th>Reading</th></tr></thead>
+          <tbody>
+            <tr><td class="m">0</td><td class="num">1 (25)</td><td>Frame rate</td></tr>
+            <tr><td class="m">1</td><td class="num">1 (12)</td><td>Hours</td></tr>
+            <tr><td class="m">2</td><td class="num">4</td><td>Minutes</td></tr>
+            <tr><td class="m">3</td><td class="num">60, all of 0–59</td><td>Seconds</td></tr>
+            <tr><td class="m">4</td><td class="num">25, all of 0–24</td><td>Frames</td></tr>
+            <tr><td class="m">5–6</td><td class="num">many</td><td>Microseconds</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">One sample per connection event, not per frame <span class="badge b-measured">Measured</span></div>
+        <p>
+          Within a session the rate is 32.2–33.2 notifications/s, median 32.7 —
+          faster than 25 fps. The gaps say why. Of 3,671 gaps inside sessions,
+          580 were 0–1 ms — two notifications delivered in the same event — and
+          of the remaining 3,091, <b>3,076 fell within 4 ms of a multiple of
+          30 ms</b>: 2,654 at one interval, 317 at two, 78 at three and a thin
+          tail out to eight. Only 15 were anywhere else. That is a 30 ms
+          connection interval with the occasional event missed, and the device
+          stamping the clock whenever it fills a packet.
+        </p>
+        <p>
+          Because 30 ms is shorter than a 40 ms frame, some frames get sampled
+          twice and none get missed. Of 3,688 notifications, 2,762 carried
+          distinct timecodes, 918 appeared twice and 4 three times — and
+          <b>of the 922 repeats, 899 carried a different microsecond
+          trailer.</b> They are two genuine readings inside one frame, not
+          retransmissions of one. The remaining 23 were byte-identical, so a
+          reader that de-duplicates on payload equality is still doing
+          something, just much less than on the advertising side.
+        </p>
+      </div>
+      <p>
+        The distinct-timecode rate is 23.9–24.9/s against a 25 fps device.
+        <b>Every frame arrives.</b> That makes this by a wide margin the best
+        clock the box publishes:
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Source</th><th>Fresh readings</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td>Advertisement</td><td class="m">1.4–1.8/s</td><td>None, passive</td></tr>
+            <tr><td><code>0dab144c</code></td><td class="m">~25/s, every frame</td><td>A connection that dies every 7 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>The microsecond field, at two frame rates</h3>
+      <p>
+        Section 04 identifies bytes 7–8 as a microsecond count by regressing
+        against host arrival times, and marked the <em>scaling</em> — one frame
+        being <code>1_000_000 / fps</code> of them — as an inference, since only
+        a 25 fps device had ever been seen. A second frame rate has now been
+        seen, and it settles it. The user set both boxes to 24 fps from the
+        Tentacle app between two captures; nothing else was changed.
+      </p>
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">The trailer tracks the frame rate</span><span class="badge b-measured">Measured</span></div>
+        <div class="panel-body">
+          <table>
+            <thead><tr><th></th><th class="num">25 fps</th><th class="num">24 fps</th></tr></thead>
+            <tbody>
+              <tr><td>Notifications</td><td class="num">3,688</td><td class="num">4,542</td></tr>
+              <tr><td>Frame-rate byte</td><td class="num m">0x19</td><td class="num m">0x18</td></tr>
+              <tr><td>Frames observed</td><td class="num m">0–24, all 25</td><td class="num m">0–23, all 24</td></tr>
+              <tr><td><b>Trailer span</b></td><td class="num m"><b>39,705</b></td><td class="num m"><b>41,646</b></td></tr>
+              <tr><td>One frame in µs</td><td class="num m">40,000</td><td class="num m">41,667</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p>
+        The span of the trailer grew when the frame rate fell, and grew to within
+        0.05% of the new frame period. A fraction-of-a-frame field could not do
+        that — it would span the same fraction of 65,536 at any rate. <b>The
+        counter is absolute microseconds on a ~1 MHz clock, and one frame's worth
+        of it is <code>1e6 / fps</code>.</b> Scale by the frame rate; do not
+        hardcode 40,000.
+      </p>
+      <p>
+        The regression agrees, and much more sharply than on the advertising
+        side. Median-of-session absolute residual of reconstructed device time
+        against host arrival time:
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Interpretation</th><th class="num">25 fps (17 sessions)</th><th class="num">24 fps (21 sessions)</th></tr></thead>
+          <tbody>
+            <tr><td>Ignore the trailer</td><td class="num m">10.00 ms</td><td class="num m">11.83 ms</td></tr>
+            <tr><td>Fraction of a frame, ÷65536</td><td class="num m">3.90 ms</td><td class="num m">4.61 ms</td></tr>
+            <tr><td><b>Microseconds, ÷1e6</b></td><td class="num m"><b>0.020 ms</b></td><td class="num m"><b>0.029 ms</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Twenty microseconds, against 0.61–0.73 ms for the same test on
+        advertisements. The reason is that a notification and its delivery are
+        locked to the same connection event, so the transmit latency barely
+        varies, where an advertisement is caught on whichever of three channels
+        the scanner happened to be on. Ignoring the trailer costs a quarter of a
+        frame at both rates, which is the quantisation you would predict.
+      </p>
+      <div class="evidence">
+        <div class="claim">What that number does and does not say <span class="badge b-measured">Measured</span></div>
+        <p>
+          It measures how <em>constant</em> (device time − host time) stays
+          within a session, not absolute accuracy — a fixed error would not show
+          up at all. Twenty microseconds of consistency over 200-odd samples is
+          the field being a microsecond counter and very little else, but it is
+          not a calibration.
+        </p>
+        <p>
+          Little-endian is ruled out flat: read that way the values span 65,400
+          of the available 65,536, which is what an arbitrary byte pair looks
+          like and not a counter into a 40 ms frame.
+        </p>
+      </div>
+
+      <h3>The few-millisecond bias is a fixed time</h3>
+      <p>
+        Section 04 records a floor around 3.7 ms in the trailer rather than 0,
+        calls the origin unknown, and asks whether a second unit would show the
+        same — a transmit-path constant being the guess. There is now data from
+        two transports, two units and two frame rates.
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Source</th><th class="num">n</th><th class="num">min</th><th class="num">max</th></tr></thead>
+          <tbody>
+            <tr><td>Ricki notify, 25 fps</td><td class="num">3,688</td><td class="num m">3,656</td><td class="num m">43,361</td></tr>
+            <tr><td>Ricki notify, 24 fps</td><td class="num">4,542</td><td class="num m">3,624</td><td class="num m">45,270</td></tr>
+            <tr><td>Ricki notify, third capture</td><td class="num">222</td><td class="num m">3,715</td><td class="num m">41,145</td></tr>
+            <tr><td>Ricki advert, same capture as its notify</td><td class="num">299</td><td class="num m">3,686</td><td class="num m">43,361</td></tr>
+            <tr><td>Liliana notify</td><td class="num">220</td><td class="num m">3,749</td><td class="num m">43,356</td></tr>
+            <tr><td>Liliana advert, same capture</td><td class="num">322</td><td class="num m">3,951</td><td class="num m">43,532</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="evidence">
+        <div class="claim">An absolute offset, not a transmit-path constant <span class="badge b-measured">Measured</span></div>
+        <p>
+          <b>The floor is not specific to the advertising path</b> — it is the
+          same on a GATT notification, and the two paths share nothing but the
+          device's clock, which makes a transmit-path constant the less likely
+          reading. And <b>it did not scale with the frame period</b>: 3,656 µs at
+          25 fps and 3,624 µs at 24 fps, where a fixed <em>fraction</em> of a
+          frame would have moved to about 3,800. So it is an absolute offset of
+          roughly 3.6 ms in the counter's origin.
+        </p>
+        <p>
+          The caveat cuts against reading much into the exact value: a minimum
+          over n samples is a biased estimator of a floor and creeps downwards as
+          n grows, which is visibly what happens above — n=220 gives 3,749 and
+          n=3,688 gives 3,656. What is consistent across all six is the
+          magnitude, not the number.
+        </p>
+      </div>
+
+      <h3><code>0dab1280</code> — device state, including the last sync time</h3>
+      <div class="evidence">
+        <div class="claim">Twenty-four bytes, length-prefixed, zero-padded, and it does not notify <span class="badge b-measured">Measured</span></div>
+        <p>
+          It pushed nothing across 38 connections in 380 s of watching. Between
+          syncs it does not change either: 50 reads over one 180 s run and 82
+          over another returned byte-identical values every time.
+        </p>
+      </div>
+      <p>It changes when the box is synced. Four samples, two boxes either side of one observed sync:</p>
+      <pre>Ricki    before   0d 6c 00 0c 01 00 53 19 00 00 04 09 1a 0b 1c 28 00×8
+Ricki    after    0d 6c 00 0c 01 00 09 18 00 00 04 09 1a 0c 2f 15 00×8
+Liliana  before   0d 10 00 01 02 00 00 00 00×16
+Liliana  after    0d 6c 00 10 01 01 09 18 00 00 01 0c 2f 11 04 09 1a 0c 2f 14 00×4</pre>
+      <div class="evidence">
+        <div class="claim">Byte 3 is a length <span class="badge b-inferred">Inferred</span></div>
+        <p>
+          It counts the bytes after itself, and the arithmetic is exact on all
+          four samples — 12, 12, 1 and 16 against payloads of 12, 12, 1 and 16
+          bytes, with the remainder of the 24 zero-padded. Four samples in three
+          shapes is thin, and this document has been wrong about a length byte
+          before, in the other direction: read this as the reading that fits, not
+          as settled.
+        </p>
+      </div>
+      <p>Laying the payload out on that basis:</p>
+      <pre>   0d   6c   00   10   01 01   09   18   00 00   01 0c 2f 11   04 09 1a 0c 2f 14
+   ~~   ~~   ~~   ~~   ~~~~~   ~~   ~~   ~~~~~   ~~~~~~~~~~~   ~~~~~~~~~~~~~~~~~
+   |    |    |    |    |  |    |    |    |       |             `-- dd mm yy hh mm ss
+   |    |    |    |    |  |    |    |    |       `-- `n` four-byte items
+   |    |    |    |    |  |    |    |    `-- always 00 00
+   |    |    |    |    |  |    |    `-- frame rate
+   |    |    |    |    |  |    `-- moved 0x53 -> 0x09 on a sync  [unknown]
+   |    |    |    |    |  `-- n, the item count
+   |    |    |    |    `-- always 01
+   |    |    |    `-- length of everything after this byte
+   |    |    `-- always 00
+   |    `-- 0x6c on both boxes after a sync, 0x10 on one before  [unknown]
+   `-- always 0d</pre>
+      <div class="evidence">
+        <div class="claim">The last six payload bytes are the date and time of the last sync <span class="badge b-measured">Measured</span></div>
+        <p>
+          Binary <code>dd mm yy hh mm ss</code>. This is the one field an
+          intervention pinned down. Both boxes were read, the user synced them
+          from the phone app while a passive scanner watched, and both were read
+          again:
+        </p>
+        <pre>Ricki     04 09 1a  0b 1c 28   ->   04 09 1a  0c 2f 15      4 Sep 26, 11:28:40 -> 12:47:21
+Liliana   (zeros)              ->   04 09 1a  0c 2f 14      4 Sep 26,             12:47:20</pre>
+        <p>
+          The scanner puts the app's activity on both boxes between 12:46:46 and
+          12:47:20 by the devices' own broadcast timecode, and the two boxes
+          wrote 12:47:21 and 12:47:20. Ricki's previous value, 11:28:40, matches
+          the earlier sync from that morning. Date first, then time, both plain
+          binary — not BCD like the advertisement's date record, which is worth
+          knowing since <code>1a</code> is 26 in binary and not a valid BCD digit
+          pair at all.
+        </p>
+      </div>
+      <div class="evidence">
+        <div class="claim">The frame rate is in there too, and it followed the app <span class="badge b-measured">Measured</span></div>
+        <p>
+          Byte 7 went <code>0x19</code> → <code>0x18</code> on Ricki and reads
+          <code>0x18</code> on Liliana, matching the 25 → 24 change the user made
+          in the same sync, and matching the frame-rate byte in both the
+          advertisement and <code>0dab144c</code>.
+        </p>
+      </div>
+      <div class="evidence">
+        <div class="claim">Two things are unexplained <span class="badge b-unknown">Unknown</span></div>
+        <p>
+          Byte 6 moved <code>0x53</code> → <code>0x09</code> on Ricki and reads
+          <code>0x09</code> on Liliana after the sync, and nothing here says what
+          it counts.
+        </p>
+        <p>
+          And <b>Liliana's record was nearly empty before the sync</b> — length
+          1, a single payload byte <code>0x02</code>, no timestamp — where Ricki
+          held a timestamp from that morning. If both boxes were synced together
+          that morning, both should have carried it. Liliana is the box that
+          spent the morning on a charger, so a power cycle clearing the record
+          would fit, and so would several other things.
+        </p>
+      </div>
+
+      <h3><code>0dab2496</code> — twenty-four zero bytes</h3>
+      <div class="evidence">
+        <div class="claim">Nothing, throughout <span class="badge b-measured">Measured</span></div>
+        <p>
+          A negative result, and worth writing down so nobody spends an afternoon
+          on it. It read as 24 zero bytes on both boxes in every session; it
+          notified nothing across 38 connections in 380 s of watching; and it was
+          unmoved by a frame-rate change, a sync from the phone app, and a charge
+          cycle. 132 reads, one distinct value.
+        </p>
+      </div>
+
+      <h3 id="write-char">The write characteristic</h3>
+      <p>
+        <code>0dab17e4</code> advertises <code>WRITE</code> and nothing else — no
+        read, no notify. There is no way to observe it from a connected client,
+        and <b>nothing was written to it.</b>
+      </p>
+      <p>
+        What the app puts there is the interesting question and this document is
+        not going to guess at it. Two of the things a sync does are now visible
+        from the outside — the clock is set, and the frame rate and a sync
+        timestamp land in <code>0dab1280</code> — which constrains the payload
+        without revealing it.
+      </p>
+      <p>
+        Capturing it needs a sniffer on the phone↔box link, since a Mac cannot
+        see traffic between a phone and a device it isn't part of:
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Route</th><th>Needs</th></tr></thead>
+          <tbody>
+            <tr><td>Tentacle Sync Studio on macOS + PacketLogger</td><td>the macOS app, and Additional Tools for Xcode</td></tr>
+            <tr><td>nRF52840 + nRF Sniffer into Wireshark</td><td>the dongle</td></tr>
+            <tr><td>Android "Bluetooth HCI snoop log"</td><td>an Android phone with the app on it</td></tr>
+            <tr><td>iOS Bluetooth debug profile + sysdiagnose</td><td>fiddlier, but no extra hardware</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        None was available for this work: no Tentacle app and no PacketLogger on
+        this machine, no dongle, no Android handset. So the write side stays
+        unknown, which is a better answer than invented bytes.
+      </p>
+
+      <h3>Descriptors</h3>
+      <div class="evidence">
+        <div class="claim">No characteristic carries a user description <span class="badge b-measured">Measured</span></div>
+        <p>
+          The only descriptor on any of the three notifying characteristics is a
+          Client Characteristic Configuration (<code>0x2902</code>), which is
+          just the subscribe bits. There is no <code>0x2901</code> Characteristic
+          User Description anywhere in the vendor service, so the device names
+          nothing for you.
+        </p>
+      </div>
+    </section>
+
     <section id="ltc">
-      <h2><span class="n">08</span> LTC over audio</h2>
+      <h2><span class="n">09</span> LTC over audio</h2>
       <div class="section-rule"></div>
       <p>
         The audio output is ordinary SMPTE 12M linear timecode — a documented
@@ -1190,7 +1711,7 @@ model number         six bytes that aren't text, then a NUL</pre>
     </section>
 
     <section id="usb">
-      <h2><span class="n">09</span> USB</h2>
+      <h2><span class="n">10</span> USB</h2>
       <div class="section-rule"></div>
       <p>
         The USB-C port charges the device and speaks a vendor protocol to the
@@ -1218,7 +1739,7 @@ model number         six bytes that aren't text, then a NUL</pre>
     </section>
 
     <section id="method">
-      <h2><span class="n">10</span> Method</h2>
+      <h2><span class="n">11</span> Method</h2>
       <div class="section-rule"></div>
       <p>
         Everything above came from watching advertisements against a device whose
@@ -1249,7 +1770,7 @@ model number         six bytes that aren't text, then a NUL</pre>
     </section>
 
     <section id="open">
-      <h2><span class="n">11</span> Open questions</h2>
+      <h2><span class="n">12</span> Open questions</h2>
       <div class="section-rule"></div>
       <p>
         Each of these needs a device the observed one couldn't provide.
@@ -1260,7 +1781,7 @@ model number         six bytes that aren't text, then a NUL</pre>
             <thead><tr><th>Question</th><th>How to answer it</th></tr></thead>
             <tbody>
               <tr>
-                <td><b>29.97 vs 30</b><br><span style="color:var(--ink-soft)">The rate is broadcast as a whole number, so the two are indistinguishable over the air.</span></td>
+                <td><b>29.97 vs 30</b><br><span style="color:var(--ink-soft)">The rate is broadcast as a whole number, so the two are indistinguishable over the air. Two whole rates, 24 and 25, have now been seen and byte 2 carried both; a fractional rate is the remaining case.</span></td>
                 <td>Set a device to 29.97 and compare byte 2 against a 30 fps device.</td>
               </tr>
               <tr>
@@ -1268,15 +1789,15 @@ model number         six bytes that aren't text, then a NUL</pre>
                 <td>Watch byte 0 in drop-frame mode — the high nibble (2 vs 4) looks like it has room.</td>
               </tr>
               <tr>
-                <td><b>The 3.7 ms bias</b><br><span style="color:var(--ink-soft)">Real and consistent, origin unknown.</span></td>
-                <td>Compare against a second unit; a transmit-path constant should be identical across devices.</td>
+                <td><b>The 3.6 ms bias</b><br><span style="color:var(--ink-soft)">Narrowed, not solved. It is on the GATT notification path as well as the advertising one, on both units, and it did <b>not</b> scale when the frame rate changed — so it is an absolute offset in the counter's origin rather than a transmit-path constant. What sets it is still unknown.</span></td>
+                <td>Compare against a device on a different firmware revision.</td>
               </tr>
               <tr>
                 <td><b>The battery scale below 96</b><br><span style="color:var(--ink-soft)">Byte 2 is a charge level and 100 is its top, but no box has been watched below 96.</span></td>
                 <td>Run one flat and see whether it reaches 0, and whether it gets there linearly.</td>
               </tr>
               <tr>
-                <td><b>What byte 1 of the manufacturer record latches on</b><br><span style="color:var(--ink-soft)"><code>0x00</code> until a box is first charged, <code>0x02</code> from then on, and it didn't come back down on unplug the way the charging bit did.</span></td>
+                <td><b>What byte 1 of the manufacturer record latches on</b><br><span style="color:var(--ink-soft)"><code>0x00</code> until a box is first charged, <code>0x02</code> from then on. It lags the plug-in by 109 s and never came back down, so it is not a charger-detect line.</span></td>
                 <td>Reboot a device reading <code>0x02</code> and see whether it clears.</td>
               </tr>
               <tr>
@@ -1288,12 +1809,28 @@ model number         six bytes that aren't text, then a NUL</pre>
                 <td>Change the date and see what moves.</td>
               </tr>
               <tr>
-                <td><b>Date record byte 8</b><br><span style="color:var(--ink-soft)"><code>00</code> in 112 records of 124, and twelve other values once each.</span></td>
+                <td><b>Date record byte 8</b><br><span style="color:var(--ink-soft)"><code>00</code> in 112 records of 124, and twelve other values once each. A later capture added <code>0x57</code>, <code>0xcf</code>, <code>0xef</code> and <code>0xf0</code> on one box in 47 records, which keeps the "mostly zero, otherwise never the same twice" pattern and still explains nothing.</span></td>
                 <td>Capture across a date change and across midnight.</td>
               </tr>
               <tr>
-                <td><b>What byte 1's bits mean</b><br><span style="color:var(--ink-soft)">Answered in the negative — it is not a length — but not answered.</span></td>
-                <td>Bits 3–6 went on together when the boxes were synced to the phone app, so toggle app settings one at a time and watch which bit follows. The bottom bits flicker on their own and want a long capture.</td>
+                <td><b>What byte 1's remaining bits mean</b><br><span style="color:var(--ink-soft)">Bit 0 is now known — clear while a central holds a GATT connection. Bits 3–6 move while the app configures a box and settle back where they started, non-monotonically, so they are not a progress counter. Bit 2 has been set in all seven values ever seen, bit 1 in only one.</span></td>
+                <td>Toggle app settings one at a time and watch which bit follows.</td>
+              </tr>
+              <tr>
+                <td><b>The write characteristic, <code>0dab17e4</code></b><br><span style="color:var(--ink-soft)">The whole other half of the protocol. Write-only, so it cannot be observed from a connected client.</span></td>
+                <td>A sniffer on the phone↔box link. See <a href="#write-char">the write characteristic</a> for the four routes and why none was available here.</td>
+              </tr>
+              <tr>
+                <td><b>What <code>0dab1280</code> byte 6 counts</b><br><span style="color:var(--ink-soft)">Moved <code>0x53</code> → <code>0x09</code> on one box across a sync, and reads <code>0x09</code> on both afterwards.</span></td>
+                <td>Sync twice in a row and see whether it moves again.</td>
+              </tr>
+              <tr>
+                <td><b>Why <code>0dab1280</code> was nearly empty on one box</b><br><span style="color:var(--ink-soft)">Length 1 and no timestamp on Liliana before the sync, where Ricki carried that morning's. Liliana had spent the morning on a charger, so a power cycle clearing the record would fit.</span></td>
+                <td>Reboot a box with a timestamp in it and read the characteristic again.</td>
+              </tr>
+              <tr>
+                <td><b>Whether the connection would live longer if the client wrote something</b><br><span style="color:var(--ink-soft)">The box hangs up after about 6.6 s regardless of what a read-only client does.</span></td>
+                <td>A keepalive on the write characteristic is a plausible reason the app doesn't suffer this; a sniffer capture would show it.</td>
               </tr>
             </tbody>
           </table>
@@ -1304,7 +1841,7 @@ model number         six bytes that aren't text, then a NUL</pre>
   </main>
 
   <footer>
-    <span>Observed against one Tentacle Sync E Mk2 at 25 fps, 4 September 2026.</span>
+    <span>Observed against two Tentacle Sync E Mk2 units at 25 and 24 fps, 4 September 2026.</span>
     <span>No affiliation with Tentacle Sync GmbH.</span>
   </footer>
 

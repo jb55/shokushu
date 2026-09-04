@@ -90,12 +90,12 @@
 //!
 //! Two boxes advertising side by side read 100 and 97 while the other four bytes
 //! were identical on both, and the one reading 97 dropped to 96 partway through
-//! a capture, by itself. Then one of them was put on a charger, twice, while the
-//! other stayed on battery as a control. Bit 7 went up on plug-in and down on
-//! unplug both times, on the charging box and never on the control, and the low
-//! seven bits climbed in between — 96 on battery, then 98, 99 and 100 on the
-//! cable. A field that tracks a cable on command, in both directions, is not a
-//! coincidence.
+//! a capture, by itself. Then one of them was put on a charger three times over
+//! an hour while the other stayed on battery as a control. Bit 7 went up on
+//! plug-in and down on unplug every time, on the charging box and never on the
+//! control, and the low seven bits climbed 96 → 97 → 98 → 99 → 100 in between,
+//! one at a time. A field that tracks a cable on command, in both directions, is
+//! not a coincidence.
 //!
 //! Masking matters: a charging device at 98% advertises `0xe2`, which is 226. A
 //! reader that takes the byte whole reports a nonsense percentage, and one that
@@ -108,11 +108,11 @@
 //! a fuller discharge would show that.
 //!
 //! The other four bytes are unknown, with one hint. Byte 1 was `0x00` on both
-//! boxes until one of them was first plugged in, when it became `0x02` — and
-//! then stayed `0x02` through both unplugs, where bit 7 of the battery byte came
-//! straight back down. So it isn't "charging"; it latched on something and
-//! didn't reset within the capture. `02` at byte 0 and `01 13` at bytes 3-4 never
-//! moved at all.
+//! boxes until the first charge, when it became `0x02` and stayed there through
+//! every later unplug. It is not the charger, though: it changed 109 seconds
+//! *after* the cable went in, by which point the battery had already gained a
+//! percent, so it latches on something slower and never reset. `02` at byte 0 and
+//! `01 13` at bytes 3-4 never moved at all.
 //!
 //! There is no Battery Service. The device's GATT server offers only Device
 //! Information (`0x180a`) and its own `0xfdac`, with no `0x180f` and no battery

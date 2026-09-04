@@ -140,7 +140,8 @@ device, so a scanner looking for "Tentacle" finds nothing. **Timecode is plain
 binary, not BCD**, which is easy to get backwards because most samples look like
 valid BCD; the date record, inconsistently, *is* BCD. And **the frame rate
 arrives as a whole number**, so 29.97 and 30 are indistinguishable over the air
-and no drop-frame flag is broadcast at all. Only 25 fps has ever been observed.
+and no drop-frame flag is broadcast at all. Only 25 and 24 fps have been
+observed.
 
 ### shokushu-probe
 
@@ -163,6 +164,36 @@ this device. Reach for it when a new firmware appears and that might have
 changed, not as part of reading timecode. Connecting is not free; it can disturb
 the advertising that the rest of this depends on, and it is per-device. The
 vendor characteristics, one of which is writable, are listed but never touched.
+
+### shokushu-gatt
+
+`shokushu-probe` says what the GATT tree *is*; `shokushu-gatt` says what the
+vendor service in it *says*. It connects, reads the three `READ | NOTIFY`
+characteristics under `0xfdac`, subscribes to all three, and logs everything the
+device pushes with a host timestamp. It writes nothing.
+
+```
+$ shokushu-gatt --name ricki                 # read and subscribe for 120 s
+$ shokushu-gatt --seconds 300 --reconnect    # keep reconnecting; the box hangs up every 7 s
+$ shokushu-gatt --scan                       # log advertisements on the same timeline
+$ shokushu-gatt --no-subscribe --poll-ms 500 # read only, no notifications
+```
+
+The useful part is the closing summary: per characteristic, how many
+notifications arrived, how many were distinct, and how many values each byte
+position took — which is how the fields were found.
+
+Two things it established. `0dab144c` carries the timecode with the
+advertisement's two header bytes removed, one sample per 30 ms connection event,
+so **every frame arrives** against the advertisement's 1.4–1.8 readings a
+second. And the box drops any connection after about 6.6 s no matter what the
+client does, which is why `--reconnect` exists. See
+[`PROTOCOL.md`](PROTOCOL.md) for the rest.
+
+The write characteristic, `0dab17e4`, is how the Tentacle app sets a device's
+clock and name. This tool does not touch it and neither should you without a
+sniffer capture of the app doing it first — a guessed payload is how a box ends
+up needing a factory reset.
 
 ## Using it as a library
 

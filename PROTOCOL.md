@@ -35,18 +35,30 @@ constant — and both had been believed on the strength of a byte that never
 varied in a corpus too small to make it vary. Where a claim below rests on
 "never observed to change", read it with that in mind.
 
-## Three transports
+Last, the vendor GATT service was read and subscribed to on both boxes — 8,230
+notifications across 38 connections — and the user drove a sync from the phone
+app on cue, twice, the second time changing the frame rate to 24. **That is the
+first observation at a second frame rate,** and it retires three inferences
+below: byte 2 is the frame rate, frames run to fps−1, and the microsecond
+counter scales as `1e6 / fps`. It also decoded one bit of the flags byte and the
+last-sync timestamp the service reports. Nothing was written to the device.
+
+## Four transports
 
 | Transport | Rate | Precision | Availability |
 |---|---|---|---|
 | BLE advertisements | ~1.4–1.8/s | <1 ms per packet | Always on, no pairing |
+| BLE GATT notifications | ~25/s, every frame | ~20 µs consistency | Needs a connection, which lasts 7 s |
 | LTC on audio out | every frame | sample-accurate | Needs a real audio input |
 | USB-C | — | — | Vendor-specific, undocumented |
 
-The trade is rate against precision. A BLE packet carries a microsecond stamp, so
-any single reading is excellent, but they arrive under twice a second — nothing
-can be clocked from them without interpolation. LTC arrives continuously and is
-what you want for syncing to picture.
+The trade is rate against precision, and then against effort. A BLE
+advertisement carries a microsecond stamp, so any single reading is excellent,
+but they arrive under twice a second — nothing can be clocked from them without
+interpolation. The vendor GATT service pushes the same reading every frame and
+holds up far better against a host clock, but the box drops the connection after
+about seven seconds, so a continuous stream means reconnecting all day. LTC
+arrives continuously and is what you want for syncing to picture.
 
 ## BLE advertisements
 
@@ -142,17 +154,54 @@ Across 2,322 payloads either side of the change the size never moved, so byte 1
 does not describe it. **Read the layout as fixed: two header bytes, a five-byte
 data field, an optional two-byte trailer.** [measured]
 
-What byte 1 *does* mean is unknown. The sync set bits 3–6 together (`0x05` →
-`0x7d` is `|= 0x78`) and the bottom bit or two flicker on their own — two `0x07`
-packets before, four `0x7c` after. That is the shape of a flags byte and not
-evidence of what it flags, so don't special-case a value: `0x7c` alone shows
-that whatever byte 1 is, today's value isn't stable either. [unknown]
+What byte 1 *does* mean was left open here as "the shape of a flags byte and not
+evidence of what it flags". One of the bits is now pinned and the rest are at
+least bounded.
+
+**Bit 0 clear means a central holds a GATT connection.** [measured] This
+document previously put the `0x7c` packets down to the bottom bits "flickering
+on their own". They weren't flickering — something was connected. Tested three
+times with the two boxes swapping roles, watching both while connecting to one:
+
+| Subject | Byte 1 while connected | Flipped back at | Control box |
+|---|---|---|---|
+| Ricki | `0x7c` ×12 | 7.1 s | Liliana `0x7d` ×341, no change |
+| Liliana | `0x7c` ×10 | 8.2 s | Ricki `0x7d` ×28, no change |
+| Liliana | `0x7c` ×2 | 8.3 s | Ricki `0x7d` ×23, no change |
+
+The subject dropped bit 0 for exactly as long as the connection lasted and set
+it again when the box hung up — and the flip-back time matches the independently
+measured connection life of about 6.6 s plus the time to connect, every time.
+The control never moved. The subject-side counts are small (2 to 12 packets)
+because a connected box advertises less, which is itself worth knowing.
+
+**Bits 3–6 move while the app configures a box, and settle back.** [measured
+that they move; [unknown] what they mean] A sync was performed from the phone
+app while a passive scanner watched both boxes:
+
+```
+Ricki     0x7d -> 0x7c -> 0x15 -> 0x3d -> (30 s) -> 0x55 -> 0x7d
+Liliana   0x7d ---------------> 0x3d -> (32 s) ----------> 0x7d
+```
+
+Both ended where they started. The intermediate values are not a monotonic
+progression — bits 3 and 5 go off at `0x55` after being on at `0x3d` — so this
+is not a progress counter being filled in. Note the first step on Ricki is
+`0x7c`: the app connected, which is bit 0 doing what bit 0 does.
+
+Every value ever observed, for whatever it is worth: `0x05`, `0x07`, `0x15`,
+`0x3d`, `0x55`, `0x7c`, `0x7d`. **Bit 2 is set in all seven.** Bit 1 has been
+seen set only in `0x07`. And the payload stayed nine bytes through every one of
+them, which is byte 1 failing to be a length for the third separate time.
+
+So: read bit 0 if you want to know whether something is connected, and do not
+special-case the byte as a whole. [unknown]
 
 ### Timecode record — `0x22`
 
 | Byte | Field | Encoding | Observed | |
 |---|---|---|---|---|
-| 2 | Frame rate | binary, whole fps | 25 only | [inferred] |
+| 2 | Frame rate | binary, whole fps | 25 and 24 | [measured] |
 | 3 | Hours | binary | 9 only | [inferred] |
 | 4 | Minutes | binary | 0–59 | [measured] |
 | 5 | Seconds | binary | 0–59, all 60 values | [measured] |
@@ -173,8 +222,16 @@ is wrong. The seconds byte was observed taking all 60 values from `0x00` to
 **09:32:57**. The date record, just to be difficult, *is* BCD.
 
 **Frames run 0 to fps−1.** [measured] All 25 values `0x00`–`0x18` appeared and
-none above, against a frame-rate byte of 25. That agreement is also the main
-support for reading byte 2 as the frame rate at all.
+none above, against a frame-rate byte of 25.
+
+That agreement used to be the main support for reading byte 2 as the frame rate
+at all, which made it an inference from a single rate. It isn't any more. The
+user set both boxes to 24 fps from the Tentacle app, and byte 2 went `0x19` →
+`0x18` on both while the frames field started topping out at 23 instead of 24 —
+all 24 values `0x00`–`0x17` and none above, over 4,542 readings. Two rates, two
+boxes, the frame ceiling following the byte both times. **Byte 2 is the frame
+rate.** [measured] The detail is in **The vendor GATT service** below, where the
+same change also settles the microsecond scaling.
 
 ### The microsecond field (bytes 7–8)
 
@@ -219,10 +276,20 @@ constant is a plausible guess and nothing more. It does not matter for
 interpolation — a constant offset cancels the moment you use a packet as an
 anchor and extrapolate. It does matter if you want absolute phase.
 
-**Scaling by frame rate is an inference.** [inferred] Only a 25 fps device was
-observed, so `1_000_000 / fps` microseconds per frame is the natural reading of a
-1 MHz counter rather than something demonstrated at a second rate. Scale by fps
-rather than hardcoding 40000.
+**Scaling by frame rate is measured, not inferred any more.** [measured] This
+said, correctly at the time, that `1_000_000 / fps` microseconds per frame was
+the natural reading of a 1 MHz counter and not something demonstrated at a
+second rate, because only a 25 fps device had ever been seen.
+
+A second rate has now been seen. At 24 fps the trailer's observed span grew from
+39,705 to 41,646, against frame periods of 40,000 and 41,667 µs — it tracked the
+frame rate to within 0.05%. A fraction-of-a-frame field could not do that, since
+it would span the same fraction of 65,536 at any rate. **Scale by fps; do not
+hardcode 40000.** Evidence in **The vendor GATT service** below.
+
+Note what did *not* scale: the few-millisecond bias above stayed at about 3.6 ms
+at both rates rather than growing with the frame period, so it is an absolute
+offset in the counter's origin and not a fixed fraction of a frame.
 
 ### Date record — `0x42`
 
@@ -296,23 +363,31 @@ that is, is a charge level.
 
 **Bit 7 of that byte means "charging".** [measured] This one was tested properly,
 because unlike a discharge it needs no patience — the intervention is a cable. One
-box was plugged into USB-C and pulled out again, twice, while the other sat on
-battery as a control:
+box was plugged into USB-C and pulled out again three times over an hour, while
+the other sat on battery as a control. Every manufacturer record from both boxes
+was captured throughout (26,401 of them); these are all the changes:
 
 ```
-[  1.3s] Liliana   02 02 e4 01 13      charging
-[ 19.9s] Liliana   02 02 64 01 13      unplugged
-[103.3s] Liliana   02 02 e4 01 13      charging again
-[114.7s] Liliana   02 02 64 01 13      unplugged again
-         Ricki     02 00 64 01 13      control, unchanged throughout
+   0.1s  Liliana   02 00 60 01 13      96%, on battery
+ 465.5s  Liliana   02 00 e0 01 13      plugged in — bit 7 up, still 96%
+ 557.1s  Liliana   02 00 e1 01 13      97%
+ 574.3s  Liliana   02 02 e1 01 13      byte 1 changes, 109 s late (see below)
+ 603.6s  Liliana   02 02 e2 01 13      98%
+ 650.3s  Liliana   02 02 e3 01 13      99%
+ 696.2s  Liliana   02 02 e4 01 13      100%
+ 738.2s  Liliana   02 02 64 01 13      unplugged — bit 7 down
+ 821.6s  Liliana   02 02 e4 01 13      plugged in again
+ 833.0s  Liliana   02 02 64 01 13      unplugged
+1677.2s  Liliana   02 02 e4 01 13      and again
+1715.8s  Liliana   02 02 64 01 13      unplugged
+         Ricki     02 00 64 01 13      control: not one change in the hour
 ```
 
-Bit 7 went up on plug-in and down on unplug, both times, on the charging box and
-never on the control. Meanwhile the low seven bits climbed: 96 on battery before
-the cable went in, then 98, 99 and 100 while it was charging. (97 was not seen,
-but the capture didn't start until after the plug-in, so it was most likely just
-missed rather than skipped.) That independently confirms the low bits are a
-charge level, and settles that the gauge tracks upwards as well as down:
+Bit 7 went up on plug-in and down on unplug, all three times, on the charging box
+and never on the control. Meanwhile the low seven bits climbed 96 → 97 → 98 → 99
+→ 100, one at a time with none skipped, over the 231 s the cable was in on the
+first cycle. That independently confirms the low bits are a charge level, and
+settles that the gauge tracks upwards as well as down:
 
 ```
    0x60   0 1100000      96%, on battery
@@ -331,13 +406,18 @@ everything below it is extrapolation. Percent is the natural reading of a gauge
 that stops at 100, but only a real discharge would show whether it reaches 0
 linearly, or at all. Nothing here has seen a box below 96.
 
-**Byte 1 latches on something, and it isn't charging.** [unknown] It read `0x00`
-on both boxes for every capture until one was first plugged in, when it became
-`0x02` — and then stayed `0x02` through both unplugs, while bit 7 of the battery
-byte came straight back down each time. So it isn't a charging flag; it is
-something that got set and did not reset within the observation. "Has been on a
-charger since boot" would fit, and so would several other things. The control box,
-never charged, still reads `0x00`.
+**Byte 1 latches on something, and it isn't the charger.** [unknown] It read
+`0x00` on both boxes for every capture until the first charge, when it became
+`0x02` and stayed there — through all three unplugs and to the end of the hour,
+while bit 7 came straight back down each time.
+
+The timing rules out the obvious reading. Byte 1 did not change when the cable
+went in: bit 7 flipped at 465.5 s and byte 1 was still `0x00` at 557.1 s, by which
+point the battery had already gained a percent. It changed at 574.3 s, **109
+seconds after charging began**, and never moved again. So it is not a
+charger-detect line, and it is not simply a slower copy of bit 7. Something a
+minute or two into a charge sets it, and nothing in the following seventeen
+minutes cleared it. The control box, never charged, still reads `0x00`.
 
 **The remaining three bytes are still unknown.** [unknown] `02` at byte 0 and
 `01 13` at bytes 3-4 never moved at all: not between two devices, not across a
@@ -364,9 +444,11 @@ Connecting reveals a little more, at the cost of no longer being passive.
 0dab2496-2cb9-11e6-b67b-9e71128cae77   READ | NOTIFY
 ```
 
-The vendor characteristics are unexamined. Reading one is harmless enough, but
-the write is presumably how the Tentacle app sets a device's time and name, and
-poking at it blind is how a box ends up needing a factory reset.
+The three notifying characteristics are decoded in **The vendor GATT service**
+below; `0dab144c` turns out to carry the timecode at the frame rate, which is
+fifteen times the advertisement's. The write is still untouched — it is
+presumably how the Tentacle app sets a device's time and name, and poking at it
+blind is how a box ends up needing a factory reset.
 
 Device Information reads, identically on both units:
 
@@ -383,6 +465,302 @@ characteristic `0x2a19` anywhere in the tree. The standard route to a charge
 level does not exist on this device, which makes the manufacturer advertisement
 above the only place it is published — and the better place anyway, since reading
 it needs no connection.
+
+## The vendor GATT service
+
+The `0xfdac` service is the same 16-bit UUID the timecode is advertised under,
+so the broadcast and this service are one service seen from two sides. That
+prior turned out to be right: what the service pushes is the timecode record
+with its header taken off, and much faster.
+
+Everything in this section is read-only. Nothing was written to any
+characteristic — see "The write characteristic" at the end for why, and for
+what it would take.
+
+Collected with `shokushu-gatt`, which connects, reads, subscribes, and logs
+what arrives with a host timestamp. Corpus: 8,230 notifications over 380 s of wall
+clock — about 250 s of it actually connected, for reasons the next subsection
+is about — from one box, plus shorter runs on the second box, at **two** frame
+rates. That is the first time anything in this document has seen a second rate.
+
+### Connections last about seven seconds
+
+**The box hangs up on its own, after around 6.6 s.** [measured] This is the
+first thing to know about the service, because it shapes everything else.
+
+| Run | Sessions | Link life |
+|---|---|---|
+| Ricki, 25 fps, subscribed | 17 | 4.44–6.81 s, mean 6.61 s |
+| Ricki, 24 fps, subscribed | 21 | 3.27–6.81 s, mean 6.59 s |
+| Liliana, subscribed | 2 single runs | 6.70 s, 6.75 s |
+
+**It is not the traffic.** [measured] The obvious explanation is that
+notifications at 33/s overrun something. They don't: a session subscribed to
+nothing at all, doing one read a second, died just the same — last successful
+read at 6.2 s, first failure at 7.1 s. Both boxes do it, so it is not one unit.
+A client that does nothing and a client taking 220 notifications get the same
+seven seconds, which is the signature of a timer and not of flow control.
+
+**Scanning while connected makes it worse.** [measured] With the scan held up
+through the connect, service discovery itself failed every time — the link died
+before a single characteristic could be read. Restarted after subscribing, the
+usual seven seconds. So the advertisement can be watched *or* the service can
+be, and a tool that wants both gets a much shorter look at the second.
+
+The practical consequence: **anything that wants a sustained stream off this
+service has to reconnect continuously.** `shokushu-gatt --reconnect` does, and
+gets 17 to 21 connections a minute. Whether the app avoids this by writing a
+keepalive is a reasonable guess and nothing more; it is the sort of thing the
+write characteristic might be for.
+
+### `0dab144c` — the timecode, headerless
+
+**Seven bytes: the advertisement's timecode record with the two header bytes
+removed.** [measured]
+
+```
+   19 0c 24 33 05   67 51
+   ~~~~~~~~~~~~~~   ~~~~~
+   |                `-- microseconds into the frame, big-endian u16
+   `-- frame rate, hours, minutes, seconds, frames — binary, as in the advert
+```
+
+Same five fields in the same order with the same encoding as bytes 2–6 of a
+`0x22` advertisement, and the same trailer as bytes 7–8. No record type, no
+flags byte. Every payload in the corpus was seven bytes — 8,230 of them across
+two frame rates, with no other length and no date record ever appearing here.
+
+The field boundaries fall out of how fast each byte moves, which is the method
+the advertisement was decoded with. Over one 180 s run:
+
+| Byte | Distinct values | Reading |
+|---|---|---|
+| 0 | 1 (`25`) | frame rate |
+| 1 | 1 (`12`) | hours |
+| 2 | 4 | minutes |
+| 3 | 60, all of `0`–`59` | seconds |
+| 4 | 25, all of `0`–`24` | frames |
+| 5–6 | many | microseconds |
+
+**One sample per connection event, not per frame.** [measured] Within a session
+the rate is 32.2–33.2 notifications/s, median 32.7 — faster than 25 fps. The
+gaps say why. Of 3,671 gaps inside sessions, 580 were 0–1 ms — two
+notifications delivered in the same event — and of the remaining 3,091,
+**3,076 fell within 4 ms of a multiple of 30 ms**: 2,654 at one interval, 317
+at two, 78 at three and a thin tail out to eight. Only 15 were anywhere else.
+That is a 30 ms connection interval with the occasional event missed, and the
+device stamping the clock whenever it fills a packet.
+
+Because 30 ms is shorter than a 40 ms frame, some frames get sampled twice and
+none get missed. Of 3,688 notifications, 2,762 carried distinct timecodes, 918
+appeared twice and 4 three times — and **of the 922 repeats, 899 carried a
+different microsecond trailer.** They are two genuine readings inside one
+frame, not retransmissions of one. The remaining 23 were byte-identical, so a
+reader that de-duplicates on payload equality is still doing something, just
+much less than on the advertising side.
+
+The distinct-timecode rate is 23.9–24.9/s against a 25 fps device. **Every
+frame arrives.** That makes this by a wide margin the best clock the box
+publishes:
+
+| Source | Fresh readings | Cost |
+|---|---|---|
+| Advertisement | 1.4–1.8/s | none, passive |
+| `0dab144c` | ~25/s, every frame | a connection that dies every 7 s |
+
+### The microsecond field, at two frame rates
+
+The advertisement section identifies bytes 7–8 as a microsecond count by
+regressing against host arrival times, and marks the *scaling* — one frame
+being `1_000_000 / fps` of them — as an inference, since only a 25 fps device
+had ever been seen. **A second frame rate has now been seen, and it settles
+it.** [measured]
+
+The user set both boxes to 24 fps from the Tentacle app between two captures.
+Nothing else was changed.
+
+| | 25 fps | 24 fps |
+|---|---|---|
+| Notifications | 3,688 | 4,542 |
+| Frame-rate byte | `0x19` | `0x18` |
+| Frames observed | `0`–`24`, all 25 | `0`–`23`, all 24 |
+| **Trailer span** | **39,705** | **41,646** |
+| One frame in µs | 40,000 | 41,667 |
+
+The span of the trailer grew when the frame rate fell, and grew to within 0.05%
+of the new frame period. A fraction-of-a-frame field could not do that — it
+would span the same fraction of 65,536 at any rate. **The counter is absolute
+microseconds on a ~1 MHz clock, and one frame's worth of it is `1e6 / fps`.**
+Scale by the frame rate; do not hardcode 40,000.
+
+The regression agrees, and much more sharply than on the advertising side.
+Median-of-session absolute residual of reconstructed device time against host
+arrival time:
+
+| Interpretation | 25 fps (17 sessions) | 24 fps (21 sessions) |
+|---|---|---|
+| Ignore the trailer | 10.00 ms | 11.83 ms |
+| Fraction of a frame, ÷65536 | 3.90 ms | 4.61 ms |
+| **Microseconds, ÷1e6** | **0.020 ms** | **0.029 ms** |
+
+Twenty microseconds, against 0.61–0.73 ms for the same test on
+advertisements. The
+reason is that a notification and its delivery are locked to the same connection
+event, so the transmit latency barely varies, where an advertisement is caught
+on whichever of three channels the scanner happened to be on. Ignoring the
+trailer costs a quarter of a frame at both rates, which is the quantisation you
+would predict.
+
+**What that number does and does not say.** It measures how *constant*
+(device time − host time) stays within a session, not absolute accuracy — a
+fixed error would not show up at all. Twenty microseconds of consistency over
+200-odd samples is the field being a microsecond counter and very little else,
+but it is not a calibration.
+
+Little-endian is ruled out flat: read that way the values span 65,400 of the
+available 65,536, which is what an arbitrary byte pair looks like and not a
+counter into a 40 ms frame.
+
+### The few-millisecond bias is a fixed time
+
+The advertisement section records a floor around 3.7 ms in the trailer rather
+than 0, calls the origin unknown, and asks whether a second unit would show the
+same — a transmit-path constant being the guess. There is now data from two
+transports, two units and two frame rates.
+
+| Source | n | min | max |
+|---|---|---|---|
+| Ricki notify, 25 fps | 3,688 | 3,656 | 43,361 |
+| Ricki notify, 24 fps | 4,542 | 3,624 | 45,270 |
+| Ricki notify, third capture | 222 | 3,715 | 41,145 |
+| Ricki advert, same capture as its notify | 299 | 3,686 | 43,361 |
+| Liliana notify | 220 | 3,749 | 43,356 |
+| Liliana advert, same capture | 322 | 3,951 | 43,532 |
+
+Two things follow. **The floor is not specific to the advertising path** — it
+is the same on a GATT notification, and the two paths share nothing but the
+device's clock, which makes a transmit-path constant the less likely reading.
+And **it did not scale with the frame period**: 3,656 µs at 25 fps and 3,624 µs
+at 24 fps, where a fixed *fraction* of a frame would have moved to about 3,800.
+So it is an absolute offset of roughly 3.6 ms in the counter's origin. [measured]
+
+The caveat matters and cuts against reading much into the exact value: a
+minimum over n samples is a biased estimator of a floor and creeps downwards as
+n grows, which is visibly what happens above — n=220 gives 3,749 and n=3,688
+gives 3,656. What is consistent across all six is the magnitude, not the number.
+
+### `0dab1280` — device state, including the last sync time
+
+**Twenty-four bytes, length-prefixed, zero-padded, and it does not notify.**
+[measured] It pushed nothing across 38 connections in 380 s of watching.
+Between syncs it does not change either: 50 reads over one 180 s run and 82 over
+another returned byte-identical values every time.
+
+It changes when the box is synced. Four samples, two boxes either side of one
+observed sync:
+
+```
+Ricki    before   0d 6c 00 0c 01 00 53 19 00 00 04 09 1a 0b 1c 28 00×8
+Ricki    after    0d 6c 00 0c 01 00 09 18 00 00 04 09 1a 0c 2f 15 00×8
+Liliana  before   0d 10 00 01 02 00 00 00 00×16
+Liliana  after    0d 6c 00 10 01 01 09 18 00 00 01 0c 2f 11 04 09 1a 0c 2f 14 00×4
+```
+
+**Byte 3 is a length.** [inferred] It counts the bytes after itself, and the
+arithmetic is exact on all four samples — 12, 12, 1 and 16 against payloads of
+12, 12, 1 and 16 bytes, with the remainder of the 24 zero-padded. Four samples
+in three shapes is thin, and this document has been wrong about a length byte
+before, in the other direction: read this as the reading that fits, not as
+settled.
+
+Laying the payload out on that basis:
+
+```
+   0d   6c   00   10   01 01   09   18   00 00   01 0c 2f 11   04 09 1a 0c 2f 14
+   ~~   ~~   ~~   ~~   ~~~~~   ~~   ~~   ~~~~~   ~~~~~~~~~~~   ~~~~~~~~~~~~~~~~~
+   |    |    |    |    |  |    |    |    |       |             `-- dd mm yy hh mm ss
+   |    |    |    |    |  |    |    |    |       `-- `n` four-byte items
+   |    |    |    |    |  |    |    |    `-- always 00 00
+   |    |    |    |    |  |    |    `-- frame rate
+   |    |    |    |    |  |    `-- moved 0x53 -> 0x09 on a sync  [unknown]
+   |    |    |    |    |  `-- n, the item count
+   |    |    |    |    `-- always 01
+   |    |    |    `-- length of everything after this byte
+   |    |    `-- always 00
+   |    `-- 0x6c on both boxes after a sync, 0x10 on one before  [unknown]
+   `-- always 0d
+```
+
+**The last six payload bytes are the date and time of the last sync, binary
+`dd mm yy hh mm ss`.** [measured] This is the one field an intervention pinned
+down. Both boxes were read, the user synced them from the phone app while a
+passive scanner watched, and both were read again:
+
+```
+Ricki     04 09 1a  0b 1c 28   ->   04 09 1a  0c 2f 15      4 Sep 26, 11:28:40 -> 12:47:21
+Liliana   (zeros)              ->   04 09 1a  0c 2f 14      4 Sep 26,             12:47:20
+```
+
+The scanner puts the app's activity on both boxes between 12:46:46 and 12:47:20
+by the devices' own broadcast timecode, and the two boxes wrote 12:47:21 and
+12:47:20. Ricki's previous value, 11:28:40, matches the earlier sync from that
+morning. Date first, then time, both plain binary — not BCD like the
+advertisement's date record, which is worth knowing since `1a` is 26 in binary
+and not a valid BCD digit pair at all.
+
+**The frame rate is in there too, and it followed the app.** [measured] Byte 7
+went `0x19` → `0x18` on Ricki and reads `0x18` on Liliana, matching the 25 → 24
+change the user made in the same sync, and matching the frame-rate byte in both
+the advertisement and `0dab144c`.
+
+Two things are unexplained. Byte 6 moved `0x53` → `0x09` on Ricki and reads
+`0x09` on Liliana after the sync, and nothing here says what it counts.
+[unknown] And **Liliana's record was nearly empty before the sync** — length 1,
+a single payload byte `0x02`, no timestamp — where Ricki held a timestamp from
+that morning. If both boxes were synced together that morning, both should have
+carried it. Liliana is the box that spent the morning on a charger, so a power
+cycle clearing the record would fit, and so would several other things.
+[unknown]
+
+### `0dab2496` — twenty-four zero bytes
+
+**Nothing, throughout.** [measured] A negative result, and worth writing down
+so nobody spends an afternoon on it. It read as 24 zero bytes on both boxes in
+every session; it notified nothing across 38 connections in 380 s of watching;
+and it was unmoved by a frame-rate change, a sync from the phone app, and a
+charge cycle. 132 reads, one distinct value.
+
+### The write characteristic
+
+`0dab17e4` advertises `WRITE` and nothing else — no read, no notify. There is
+no way to observe it from a connected client, and **nothing was written to it.**
+
+What the app puts there is the interesting question and this document is not
+going to guess at it. Two of the things a sync does are now visible from the
+outside — the clock is set, and the frame rate and a sync timestamp land in
+`0dab1280` — which constrains the payload without revealing it.
+
+Capturing it needs a sniffer on the phone↔box link, since a Mac cannot see
+traffic between a phone and a device it isn't part of:
+
+| Route | Needs |
+|---|---|
+| Tentacle Sync Studio on macOS + PacketLogger | the macOS app, and Additional Tools for Xcode |
+| nRF52840 + nRF Sniffer into Wireshark | the dongle |
+| Android "Bluetooth HCI snoop log" | an Android phone with the app on it |
+| iOS Bluetooth debug profile + sysdiagnose | fiddlier, but no extra hardware |
+
+None was available for this work: no Tentacle app and no PacketLogger on this
+machine, no dongle, no Android handset. So the write side stays unknown, which
+is a better answer than invented bytes.
+
+### Descriptors
+
+**No characteristic carries a user description.** [measured] The only descriptor
+on any of the three notifying characteristics is a Client Characteristic
+Configuration (`0x2902`), which is just the subscribe bits. There is no `0x2901`
+Characteristic User Description anywhere in the vendor service, so the device
+names nothing for you.
 
 ## LTC over audio
 
@@ -469,34 +847,56 @@ Each needs a device the observed one couldn't provide.
 
 - **29.97 vs 30.** The rate is broadcast as a whole number, so the two are
   indistinguishable over the air. Set a device to 29.97 and compare byte 2 against
-  a 30 fps device.
+  a 30 fps device. Two whole rates, 24 and 25, have now been seen and byte 2
+  carried both; a fractional rate is the remaining case.
 - **Drop-frame.** No flag appears anywhere in the payload; LTC has one, BLE seems
   not to. Watch byte 0 in drop-frame mode — the high nibble (2 vs 4) looks like it
   has room.
-- **The 3.7 ms bias.** Real and consistent, origin unknown. Compare against a
-  second unit; a transmit-path constant should be identical across devices.
+- **The 3.6 ms bias.** Narrowed, not solved. It is on the GATT notification path
+  as well as the advertising one, on both units, and it did **not** scale when the
+  frame rate changed — so it is an absolute offset in the counter's origin rather
+  than a transmit-path constant or a fixed fraction of a frame. What sets it is
+  still unknown. A device on a different firmware revision is the next test.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.
 - **What byte 1 of the manufacturer record latches on.** `0x00` until a box is
-  first charged, `0x02` from then on, and it did not come back down on unplug the
-  way the charging bit did. Reboot a device that reads `0x02` and see whether it
-  clears; if it does, it's "charged since boot" and not something about the
-  battery.
+  first charged, `0x02` from then on. It lagged the plug-in by 109 s and never
+  came back down, so it is neither a charger-detect line nor a slow copy of the
+  charging bit. Reboot a device that reads `0x02` and see whether it clears; if it
+  does, it's "charged since boot" and not something about the battery.
 - **The remaining manufacturer bytes,** `02` and `01 13`. Unmoved by a second
   device, a charge cycle and a firmware-level app sync alike. Compare against a
   device on a different firmware revision.
 - **Date record bytes 2 and 6,** fixed at `00` and `02`. Change the date and see
   what moves.
-- **What byte 1's bits mean.** Answered in the negative — it is not a length —
-  but not answered. Bits 3–6 went on together when the boxes were synced to the
-  phone app, so toggle app settings one at a time and watch which bit follows;
-  the bottom bits flicker on their own and want a long capture to correlate
-  against anything.
+- **What byte 1's remaining bits mean.** Bit 0 is now known — it is clear while
+  a central holds a GATT connection. Bits 3–6 move while the app configures a box
+  and settle back where they started, non-monotonically, so they are not a
+  progress counter. Bit 2 has been set in all seven values ever seen and bit 1 in
+  only one. Toggle app settings one at a time and watch which bit follows.
 - **Date record byte 8.** `00` in 112 records of 124 and twelve other values
-  once each. Capture across a date change and across midnight.
+  once each. A later capture added five more distinct values on one box
+  (`0x57`, `0xcf`, `0xef`, `0xf0` alongside `0x00`) in 47 records, which keeps
+  the pattern of "mostly zero, otherwise never the same twice" and still
+  explains nothing. Capture across a date change and across midnight.
+- **The write characteristic, `0dab17e4`.** The whole other half of the protocol.
+  Write-only, so it cannot be observed from a connected client; it needs a
+  sniffer on the phone↔box link. See **The write characteristic** above for the
+  four routes and why none was available here.
+- **What `0dab1280` byte 6 counts.** It moved `0x53` → `0x09` on one box across a
+  sync and reads `0x09` on both afterwards. Sync twice in a row and see whether it
+  moves again.
+- **Why `0dab1280` was nearly empty on one box.** Length 1 and no timestamp on
+  Liliana before the sync, where Ricki carried that morning's. Liliana had spent
+  the morning on a charger, so a power cycle clearing the record would fit. Reboot
+  a box with a timestamp in it and read the characteristic again.
+- **Whether the connection would live longer if the client wrote something.** The
+  box hangs up after about 6.6 s regardless of what a read-only client does. A
+  keepalive on the write characteristic is a plausible reason the app doesn't
+  suffer this, and a sniffer capture would show it.
 
 ---
 
-No affiliation with Tentacle Sync GmbH. Observed against one Tentacle Sync E Mk2
-at 25 fps on 2026-09-04.
+No affiliation with Tentacle Sync GmbH. Observed against two Tentacle Sync E Mk2
+units, at 25 and 24 fps, on 2026-09-04.
