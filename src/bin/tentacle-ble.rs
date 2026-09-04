@@ -7,6 +7,10 @@
 //! smoothly instead of jumping. `--json` is left alone — it emits the readings
 //! that actually arrived, and nothing interpolated.
 //!
+//! Every Tentacle in range gets a line of its own, since each keeps its own
+//! clock: two boxes needn't be showing the same timecode, or even running at the
+//! same frame rate.
+//!
 //! `--raw` turns this back into the reconnaissance tool it started as, dumping
 //! advertisement payloads and marking which bytes changed. That's how the
 //! layout in [`tentacle::ble`] was worked out, and it's the way to work out
@@ -23,7 +27,7 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, PeripheralId};
 use clap::Parser;
 use futures::stream::StreamExt;
-use tentacle::ble::{self, Advert, Date};
+use tentacle::ble::{self, Advert, Date, Timecode};
 use tentacle::freerun::{FreeRun, Reading};
 use uuid::Uuid;
 
@@ -60,6 +64,10 @@ struct Seen {
     date: Option<Date>,
     /// The local clock this device's advertisements anchor.
     clock: FreeRun,
+    /// When this device first sent timecode, which is where its line sits.
+    /// Something fixed has to decide that: `seen` is a `HashMap`, and iterating
+    /// it hands the devices back in a different order on every redraw.
+    first_timecode: Option<Instant>,
     manufacturer: HashMap<u16, Vec<u8>>,
     service: HashMap<Uuid, Vec<u8>>,
     adverts: u64,
@@ -69,6 +77,16 @@ struct Seen {
 /// Tentacle broadcasts, so each frame appears within a tick of when it starts,
 /// and far too cheap to be worth tuning.
 const TICK: Duration = Duration::from_millis(20);
+
+/// How long a device that's gone quiet keeps its line.
+///
+/// Past [`tentacle::freerun::HOLDOVER`] a line freezes on the last reading that
+/// arrived and counts up, which is worth seeing: reception is bursty and usually
+/// comes back. A box switched off ten minutes ago isn't coming back and
+/// shouldn't still be holding a line, so the line goes once it has been silent
+/// this long. The device stays in `seen`, so if it does return it reappears
+/// where it was rather than jumping to the bottom.
+const LINGER: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -109,9 +127,9 @@ async fn main() -> Result<()> {
     tokio::pin!(deadline);
 
     let mut seen: HashMap<PeripheralId, Seen> = HashMap::new();
-    // Which device's clock the display is following: the last one to have sent
-    // timecode, which is also how this behaved before it interpolated.
-    let mut showing: Option<PeripheralId> = None;
+    // How many lines the last redraw left on screen, which is what the next one
+    // has to move the cursor back up by.
+    let mut drawn = 0usize;
     let interpolating = !opt.raw && !opt.json;
     let mut ticker = tokio::time::interval(TICK);
     // Redraws are only worth doing on an even cadence. Catching up on ticks
@@ -123,7 +141,7 @@ async fn main() -> Result<()> {
         let event = tokio::select! {
             _ = &mut deadline => break,
             _ = ticker.tick(), if interpolating => {
-                render(&mut seen, showing.as_ref(), Instant::now());
+                render(&mut seen, &mut drawn, Instant::now());
                 continue;
             }
             event = events.next() => match event {
@@ -153,38 +171,36 @@ async fn main() -> Result<()> {
 
         if opt.raw {
             report_raw(&opt, entry, &id, start.elapsed().as_secs_f64(), event);
-        } else if decode(&opt, entry, &tentacle_service, event, arrived) {
-            showing = Some(id);
+        } else {
+            decode(&opt, entry, &tentacle_service, event, arrived);
         }
     }
 
     central.stop_scan().await?;
-    if !opt.raw && !opt.json {
-        println!();
-    }
+    // Every drawn line ends in a newline, so the cursor is already sitting on a
+    // fresh one below the display; there is nothing to add to leave it there.
     Ok(())
 }
 
-/// Takes in one advertisement. Returns whether it carried timecode, which is
-/// what makes its device the one worth displaying.
+/// Takes in one advertisement.
 ///
-/// In `--json` this prints the reading; otherwise it only anchors the clock, and
-/// [`render`] does the drawing on its own schedule.
+/// In `--json` this prints the reading; otherwise it only anchors that device's
+/// clock, and [`render`] does the drawing on its own schedule.
 fn decode(
     opt: &Opt,
     seen: &mut Seen,
     tentacle_service: &Uuid,
     event: CentralEvent,
     arrived: Instant,
-) -> bool {
+) {
     let CentralEvent::ServiceDataAdvertisement { service_data, .. } = event else {
-        return false;
+        return;
     };
     let Some(payload) = service_data.get(tentacle_service) else {
-        return false;
+        return;
     };
     let Some(advert) = ble::parse(payload) else {
-        return false;
+        return;
     };
 
     match advert {
@@ -192,7 +208,6 @@ fn decode(
             // The date comes round far more rarely than the timecode, so hold
             // onto it and show it alongside.
             seen.date = Some(date);
-            false
         }
         Advert::Timecode(tc) => {
             if opt.json {
@@ -209,42 +224,133 @@ fn decode(
                     seen.rssi.map_or("null".to_string(), |r| r.to_string()),
                 );
             } else {
+                seen.first_timecode.get_or_insert(arrived);
                 seen.clock.anchor(&tc, arrived);
             }
-            true
         }
     }
 }
 
-/// Draws the live display from the free-running clock, so it ticks between
-/// advertisements instead of only when one lands.
-fn render(seen: &mut HashMap<PeripheralId, Seen>, showing: Option<&PeripheralId>, now: Instant) {
-    let Some(entry) = showing.and_then(|id| seen.get_mut(id)) else {
-        return;
-    };
-    let Some(reading) = entry.clock.sample(now) else {
-        return;
-    };
+/// One device's line, before it's laid out. The name column is padded to the
+/// widest name on screen, so every row has to be in hand before any one of them
+/// can be formatted.
+struct Row {
+    /// First timecode, then id to break a tie: where this line sits, and fixed
+    /// for as long as the device keeps it.
+    order: (Instant, String),
+    tc: Timecode,
+    name: String,
+    date: Option<Date>,
+    rssi: Option<i16>,
+    note: String,
+}
 
-    // Off the air, freeze on the last reading that actually arrived and say how
-    // long ago, rather than carrying on and making timecode up.
-    let (tc, note) = match reading {
-        Reading::Running(tc) => (tc, String::new()),
-        Reading::Lost { last, since } => (
-            last,
-            format!("   no signal for {:.1}s", since.as_secs_f64()),
-        ),
-    };
+/// Draws a line per device from that device's free-running clock, so each ticks
+/// between its own advertisements instead of only when one lands — and two boxes
+/// in range don't fight over a single line.
+fn render(seen: &mut HashMap<PeripheralId, Seen>, drawn: &mut usize, now: Instant) {
+    let mut rows = Vec::new();
 
-    print!(
-        "\r  {tc}{:<3}   {:>3} fps   {}{}{}{note}   \x1b[K",
-        tenth(tc.subframe_fraction()),
-        tc.fps,
-        entry.name.as_deref().unwrap_or("<unnamed>"),
-        entry.date.map_or(String::new(), |d| format!("   {d}")),
-        entry.rssi.map_or(String::new(), |r| format!("   {r} dBm")),
-    );
+    for (id, entry) in seen.iter_mut() {
+        // No anchor yet means no clock to sample, which is also the filter that
+        // keeps the display to Tentacles: `seen` holds every peripheral the
+        // adapter noticed, and most of them never send timecode.
+        let (Some(first), Some(reading)) = (entry.first_timecode, entry.clock.sample(now)) else {
+            continue;
+        };
+
+        // Off the air, freeze on the last reading that actually arrived and say
+        // how long ago, rather than carrying on and making timecode up.
+        let (tc, note) = match reading {
+            Reading::Running(tc) => (tc, String::new()),
+            Reading::Lost { last, since } => {
+                if since > LINGER {
+                    continue;
+                }
+                (
+                    last,
+                    format!("   no signal for {:.1}s", since.as_secs_f64()),
+                )
+            }
+        };
+
+        rows.push(Row {
+            order: (first, short_id(id)),
+            tc,
+            name: entry.name.clone().unwrap_or_else(|| "<unnamed>".into()),
+            date: entry.date,
+            rssi: entry.rssi,
+            note,
+        });
+    }
+
+    let lines = lay_out(rows);
+    print!("{}", redraw(&lines, *drawn));
+    *drawn = lines.len();
     let _ = std::io::stdout().flush();
+}
+
+/// Puts the rows in a fixed order and formats each one into a line.
+///
+/// The order has to come out the same on every redraw. Rows arrive in
+/// `HashMap` order, which is randomised per iteration, so drawing them as they
+/// come would have the devices swapping places fifty times a second — worse to
+/// look at than the one line this replaced.
+fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
+    rows.sort_by(|a, b| a.order.cmp(&b.order));
+    let name_width = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    rows.iter()
+        .map(|r| {
+            format!(
+                "  {}{:<3}   {:>3} fps   {:<name_width$}{}{}{}",
+                r.tc,
+                tenth(r.tc.subframe_fraction()),
+                r.tc.fps,
+                r.name,
+                r.date.map_or(String::new(), |d| format!("   {d}")),
+                r.rssi.map_or(String::new(), |v| format!("   {v} dBm")),
+                r.note,
+            )
+        })
+        .collect()
+}
+
+/// The escape sequence that replaces the `previous` lines on screen with these.
+///
+/// Every line ends in a newline, so the cursor finishes on a fresh line below
+/// the display — where it wants to be left at exit, and where the next redraw
+/// comes back up from. It moves up by what was drawn last time rather than by
+/// what's about to be drawn: a second box coming into range extends the display
+/// downwards, and a device dropping off has to have its line blanked before the
+/// cursor can come back to sit under the ones that remain.
+fn redraw(lines: &[String], previous: usize) -> String {
+    if lines.is_empty() && previous == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    if previous > 0 {
+        out.push_str(&format!("\x1b[{previous}A"));
+    }
+    out.push('\r');
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\x1b[K\n");
+    }
+
+    let stale = previous.saturating_sub(lines.len());
+    for _ in 0..stale {
+        out.push_str("\x1b[K\n");
+    }
+    if stale > 0 {
+        out.push_str(&format!("\x1b[{stale}A"));
+    }
+    out
 }
 
 /// The sub-frame position as a single digit, ".n" of the way into the frame.
@@ -373,4 +479,98 @@ fn hex(bytes: &[u8]) -> String {
 fn short_id(id: &PeripheralId) -> String {
     let s = id.to_string();
     s.rsplit(':').next().unwrap_or(&s).chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(order: (Instant, &str), name: &str) -> Row {
+        Row {
+            order: (order.0, order.1.into()),
+            tc: Timecode {
+                fps: 25,
+                hours: 9,
+                minutes: 44,
+                seconds: 22,
+                frames: 13,
+                subframe_micros: 12_000,
+            },
+            name: name.into(),
+            date: None,
+            rssi: Some(-46),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn nothing_in_range_draws_nothing() {
+        assert_eq!(redraw(&[], 0), "");
+    }
+
+    #[test]
+    fn the_first_draw_leaves_the_cursor_below_the_lines() {
+        assert_eq!(
+            redraw(&["a".into(), "b".into()], 0),
+            "\ra\x1b[K\nb\x1b[K\n"
+        );
+    }
+
+    #[test]
+    fn a_redraw_comes_up_by_what_was_drawn_last_time() {
+        // Two lines on screen and three to draw: come up two, and the third
+        // extends the display downwards.
+        assert_eq!(
+            redraw(&["a".into(), "b".into(), "c".into()], 2),
+            "\x1b[2A\ra\x1b[K\nb\x1b[K\nc\x1b[K\n"
+        );
+    }
+
+    #[test]
+    fn a_device_dropping_off_has_its_line_blanked() {
+        // Three on screen and one left: the two it vacated are cleared rather
+        // than left frozen, and the cursor comes back under the survivor.
+        assert_eq!(
+            redraw(&["a".into()], 3),
+            "\x1b[3A\ra\x1b[K\n\x1b[K\n\x1b[K\n\x1b[2A"
+        );
+    }
+
+    #[test]
+    fn lines_keep_their_order_however_the_map_hands_them_over() {
+        let early = Instant::now();
+        let late = early + Duration::from_secs(1);
+        let ricki = || row((early, "aabbccdd"), "Ricki");
+        let bob = || row((late, "00112233"), "Bob");
+
+        let forwards = lay_out(vec![ricki(), bob()]);
+        let backwards = lay_out(vec![bob(), ricki()]);
+
+        assert_eq!(forwards, backwards);
+        assert!(forwards[0].contains("Ricki"), "{:?}", forwards);
+        assert!(forwards[1].contains("Bob"), "{:?}", forwards);
+    }
+
+    #[test]
+    fn two_devices_that_start_together_still_order_the_same_way() {
+        // Instants can tie; the id breaks it, so the order is still fixed.
+        let at = Instant::now();
+        let one = || row((at, "00112233"), "Bob");
+        let two = || row((at, "aabbccdd"), "Ricki");
+
+        assert_eq!(lay_out(vec![one(), two()]), lay_out(vec![two(), one()]));
+    }
+
+    #[test]
+    fn the_name_column_is_padded_to_the_widest_name() {
+        let at = Instant::now();
+        let lines = lay_out(vec![
+            row((at, "00112233"), "Bob"),
+            row((at + Duration::from_secs(1), "aabbccdd"), "Ricki"),
+        ]);
+
+        // Identical but for the name, so equal length means what follows the
+        // name lines up between the two.
+        assert_eq!(lines[0].len(), lines[1].len());
+    }
 }

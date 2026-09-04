@@ -10,7 +10,8 @@ written up in [PROTOCOL.md](PROTOCOL.md).
 ```
 $ tentacle-ble
 adapter state: PoweredOn — scanning until interrupted
-  09:44:22:13.3    25 fps   Ricki   2026-09-04   -46 dBm
+  11:12:00:16.5     25 fps   Ricki     2026-09-04   -43 dBm
+  11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm
 ```
 
 ```
@@ -39,6 +40,11 @@ $ tentacle-ble --json               # one JSON object per advert, uninterpolated
 $ tentacle-ble --raw                # dump advertisements, marking changed bytes
 ```
 
+Every Tentacle in range gets a line of its own, in the order they first turned
+up, and each free-runs its own clock. Two boxes needn't be showing the same
+timecode — or even running at the same frame rate — and each still ticks
+correctly rather than the two of them fighting over one line.
+
 The display free-runs between advertisements. They arrive only one or two times
 a second, so waiting for them meant the timecode jumped a dozen frames at a
 time; instead each one anchors a local clock and the display is redrawn at the
@@ -48,8 +54,12 @@ never does. If nothing arrives for five seconds it stops rather than inventing
 frames, and says so:
 
 ```
-  10:03:40:16.8     25 fps   Ricki   2026-09-04   -46 dBm   no signal for 4.2s
+  10:03:40:16.8     25 fps   Ricki     2026-09-04   -46 dBm   no signal for 6.1s
 ```
+
+Reception is bursty enough that a gap is usually worth waiting out, so the line
+stays, frozen on the last reading that arrived. After thirty seconds of silence
+it goes: by then the box has been switched off rather than merely missed.
 
 Worth being clear about: interpolating makes the display *smooth*, not more
 *accurate*. It adds no information the advertisements didn't carry. `--json` is
