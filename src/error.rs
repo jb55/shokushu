@@ -1,12 +1,9 @@
 //! What can go wrong.
+//!
+//! Only the adapter can, which is why this module is behind the `scan` feature
+//! — see the crate docs.
 
 /// An error from anything in this crate that talks to hardware.
-///
-/// The decoders can't fail this way — [`ble::parse`](crate::ble::parse) and
-/// [`LtcDecoder`](crate::ltc::LtcDecoder) answer `None` or nothing at all for
-/// input they don't recognise, since a stream of advertisements or audio is
-/// expected to contain things that aren't timecode. Errors here are about the
-/// adapter, not the bytes.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

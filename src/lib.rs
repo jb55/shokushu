@@ -2,45 +2,52 @@
 //!
 //! [`ble`] reads it out of the device's Bluetooth advertisements, without
 //! pairing or connecting to anything; [`ltc`] decodes it from an audio input;
-//! [`freerun`] smooths either into a clock that ticks between readings.
+//! [`freerun`] smooths either into a clock that ticks between readings. Both
+//! sources decode into the one [`Timecode`], though they can't tell you quite
+//! the same things about it — see the [`timecode`] module.
 //!
-//! Both sources decode into the one [`Timecode`], though they can't tell you
-//! quite the same things about it — see the [`timecode`] module.
+//! [`ble::Scanner`] is the way in if you have a Tentacle and want the time off
+//! it; its module docs have the two ways to read one.
 //!
-//! ```no_run
-//! use tentacle::ble::{Event, Scanner};
+//! # What needs which feature
 //!
-//! # async fn run() -> tentacle::Result<()> {
-//! let mut scan = Scanner::builder().name("ricki").start().await?;
-//! while let Some(event) = scan.next().await {
-//!     if let Event::Timecode { timecode, .. } = event {
-//!         println!("{timecode}");
-//!     }
-//! }
-//! # Ok(())
-//! # }
-//! ```
+//! The decoders have no dependencies and are always available: [`ble::parse`]
+//! turns an advertisement's bytes into a reading, [`ltc::LtcDecoder`] turns
+//! audio samples into frames, and [`freerun`] turns either into a clock. None
+//! of them do any I/O, so none of them can fail.
 //!
-//! Advertisements arrive only once or twice a second, so anything drawing at
-//! its own refresh rate should read the clocks instead:
+//! Getting hold of the bytes is what costs something, and that's what the
+//! features gate:
 //!
-//! ```no_run
-//! # use std::time::Instant;
-//! # use tentacle::ble::Scanner;
-//! # async fn run(scan: &mut Scanner) {
-//! for device in scan.devices() {
-//!     if let Some(reading) = device.reading(Instant::now()) {
-//!         println!("{:?} {reading:?}", device.name());
-//!     }
-//! }
-//! # }
+//! - `scan` brings in `btleplug` and a tokio runtime for [`ble::Scanner`].
+//! - `audio` brings in `cpal`, for the `tentacle` binary. There's no library
+//!   audio transport yet.
+//! - `cli` is what the binaries need to be binaries.
+//!
+//! All three are on by default so the binaries build. A library taking the
+//! decoders alone wants `default-features = false`:
+//!
+//! ```toml
+//! tentacle = { version = "0.1", default-features = false, features = ["scan"] }
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod ble;
-pub mod error;
 pub mod freerun;
 pub mod ltc;
 pub mod timecode;
 
+/// Errors from anything that talks to hardware.
+///
+/// Gated on `scan` because that's the only thing here that can fail: the
+/// decoders answer `None` for input they don't recognise rather than erroring,
+/// since a stream of advertisements or of audio is expected to contain things
+/// that aren't timecode.
+#[cfg(feature = "scan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scan")))]
+pub mod error;
+
+#[cfg(feature = "scan")]
 pub use error::{Error, Result};
 pub use timecode::{Rate, Timecode};

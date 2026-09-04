@@ -15,6 +15,32 @@
 //! advertisement anchors its device's clock on the way past, whether or not
 //! anyone reads the event.
 //!
+//! ```no_run
+//! use tentacle::ble::{Event, Scanner};
+//!
+//! # async fn run() -> tentacle::Result<()> {
+//! let mut scan = Scanner::builder().name("ricki").start().await?;
+//! while let Some(event) = scan.next().await {
+//!     if let Event::Timecode { timecode, .. } = event {
+//!         println!("{timecode}");
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ```no_run
+//! # use std::time::Instant;
+//! # use tentacle::ble::Scanner;
+//! # async fn run(scan: &mut Scanner) {
+//! for device in scan.devices() {
+//!     if let Some(reading) = device.reading(Instant::now()) {
+//!         println!("{:?} {reading:?}", device.name());
+//!     }
+//! }
+//! # }
+//! ```
+//!
 //! # Arrival times
 //!
 //! Every advertisement is stamped the moment it comes off the stream, before

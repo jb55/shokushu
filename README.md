@@ -160,6 +160,87 @@ changed, not as part of reading timecode. Connecting is not free; it can disturb
 the advertising that the rest of this depends on, and it is per-device. The
 vendor characteristics, one of which is writable, are listed but never touched.
 
+## Using it as a library
+
+The binaries are thin. Everything they do is in the crate, and `ble::Scanner`
+is the way in — it owns the adapter, keeps a `Device` per box in range, and
+anchors each one's clock as advertisements land.
+
+There are two ways to read it, and both are wanted. Events tell you what
+arrived:
+
+```rust
+use tentacle::ble::{Event, Scanner};
+
+let mut scan = Scanner::builder().name("ricki").start().await?;
+while let Some(event) = scan.next().await {
+    match event {
+        Event::Timecode { timecode, .. } => println!("{timecode}"),
+        Event::Battery { status, .. } => println!("{}%", status.battery_percent),
+        _ => {}
+    }
+}
+```
+
+The clocks tell you what time it is *now*, which is a different question.
+Advertisements land once or twice a second, so anything drawing at its own
+refresh rate wants this one — it's what `tentacle-ble` draws from:
+
+```rust
+for device in scan.devices() {
+    match device.reading(Instant::now()) {
+        Some(Reading::Running(tc)) => println!("{} {tc}", device.name().unwrap_or("?")),
+        Some(Reading::Lost { last, since }) => println!("{last} — quiet for {since:?}"),
+        None => {}  // not a Tentacle, or not one that has spoken up yet
+    }
+}
+```
+
+`cargo run --example scan` runs both side by side.
+
+When nothing decodes, `scan.diagnosis()` says which of the failures it is —
+nothing in range, something in range whose payload no longer decodes, or a scan
+delivering nothing at all. It carries the counts and no wording, because the
+sentence that suits a terminal names flags a GUI hasn't got; `tentacle-ble`
+writes its own.
+
+### Features
+
+The decoders have no dependencies and are always there: `ble::parse` for an
+advertisement's bytes, `ltc::LtcDecoder` for audio samples, `freerun` to turn
+either into a clock. None of them do I/O, so none of them can fail. Getting
+hold of the bytes is what costs something, and that is what the features gate —
+`scan` for Bluetooth (`btleplug` and a tokio runtime), `audio` for the LTC
+binary's input (`cpal`), `cli` for the binaries.
+
+All three are on by default so `cargo run` works as it always has. Reading
+Bluetooth without compiling an audio stack:
+
+```toml
+tentacle = { version = "0.1", default-features = false, features = ["scan"] }
+```
+
+Or the decoders alone, with no transport and no dependencies at all:
+
+```toml
+tentacle = { version = "0.1", default-features = false }
+```
+
+### Timecode
+
+Both sources decode into one `Timecode`, carrying a `Rate`. Neither can fill a
+`Rate` on its own, and they fail in opposite directions: the advertisement
+carries a whole frame rate and no drop-frame flag, so 29.97 and 30 are
+indistinguishable over the air, while LTC carries the drop-frame flag and no
+rate at all — its rate is inferred from the bit period the decoder locked to.
+So `drop_frame: false` on a Bluetooth reading means *unknown*, not *known not
+to be drop-frame*.
+
+Drop-frame arithmetic is deliberately not implemented: drop-frame skips frame
+*numbers*, so `frame_position` would be wrong for it. It debug-asserts, and
+`checked_frame_position` returns `None`, rather than quietly handing back a
+number that's off by a couple of seconds a day.
+
 ## Wiring it to a Mac
 
 The catch is the 3.5 mm jack. It auto-detects what's plugged in, and a

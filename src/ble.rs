@@ -125,9 +125,14 @@ use std::time::Duration;
 
 use crate::timecode::{Rate, Timecode};
 
+#[cfg(feature = "scan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scan")))]
 pub mod diagnostics;
+#[cfg(feature = "scan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scan")))]
 pub mod scan;
 
+#[cfg(feature = "scan")]
 pub use scan::{Advertisement, Device, Event, Scanner};
 
 /// The 16-bit service UUID the Tentacle advertises under.

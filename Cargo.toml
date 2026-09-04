@@ -3,12 +3,60 @@ name = "tentacle"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Everything on, so the binaries build and run as they always have. A library
+# consumer wanting the decoders alone takes `default-features = false` and adds
+# back what it needs — the point of the split is that reading Bluetooth doesn't
+# have to compile an audio stack, not that a bare `cargo run` should stop
+# working here.
+default = ["scan", "audio", "cli"]
+
+# The Bluetooth transport: `ble::Scanner`, `ble::Device`, `ble::diagnostics`.
+# Parsing an advertisement needs none of it — `ble::parse` is always available.
+scan = ["dep:btleplug", "dep:futures", "dep:tokio", "dep:uuid", "dep:thiserror"]
+
+# The audio input the `tentacle` binary decodes LTC from. There is no library
+# transport for it yet, so this is the binary's dependency and nothing else's;
+# `ltc::LtcDecoder` is always available and takes samples from wherever you got
+# them.
+audio = ["dep:cpal"]
+
+# What the binaries need to be binaries.
+cli = ["dep:clap", "dep:anyhow"]
+
 [dependencies]
-anyhow = "1.0.104"
-btleplug = "0.13"
-clap = { version = "4.6.6", features = ["derive"] }
-cpal = "0.18"
-futures = "0.3.34"
-thiserror = "2.0"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
-uuid = "1.26.0"
+anyhow = { version = "1.0.104", optional = true }
+btleplug = { version = "0.13", optional = true }
+clap = { version = "4.6.6", features = ["derive"], optional = true }
+cpal = { version = "0.18", optional = true }
+futures = { version = "0.3.34", optional = true }
+thiserror = { version = "2.0", optional = true }
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+], optional = true }
+uuid = { version = "1.26.0", optional = true }
+
+[[bin]]
+name = "tentacle"
+path = "src/main.rs"
+required-features = ["audio", "cli"]
+
+[[bin]]
+name = "tentacle-ble"
+path = "src/bin/tentacle-ble.rs"
+required-features = ["scan", "cli"]
+
+[[bin]]
+name = "tentacle-probe"
+path = "src/bin/tentacle-probe.rs"
+required-features = ["scan", "cli"]
+
+[[example]]
+name = "scan"
+required-features = ["scan"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
