@@ -21,8 +21,10 @@ reception timing and an independent fifth by a second implementation — all fro
 the main limitation of everything here.
 
 A second device, on the same firmware and also at 25 fps, was added later that
-day: a 45-minute two-box capture and a GATT probe of both. It lifts the
-single-device caveat only where it says so — the battery byte and the GATT tree.
+day: a 45-minute two-box capture, a GATT probe of both, and two plug/unplug
+cycles on one of them with the other held on battery as a control. It lifts the
+single-device caveat only where it says so — the battery byte, the charging bit
+and the GATT tree.
 Two boxes of the same revision still cannot separate a firmware constant from a
 field that never moved, and nothing here has yet seen a second frame rate.
 
@@ -264,7 +266,7 @@ a different event to a scanner, which is why it is easy to miss.
 
 ```
 company 0x043f    02 00 64 01 13
-                        ~~ battery
+                        ~~ battery, with charging in the top bit
 ```
 
 **Byte 2 is the battery level.** [measured] Two boxes were put in range of each
@@ -292,22 +294,57 @@ it, not on either device. A byte that differs between two devices, decrements by
 one on the one that isn't full, never rises, and sits at exactly 100 on the one
 that is, is a charge level.
 
+**Bit 7 of that byte means "charging".** [measured] This one was tested properly,
+because unlike a discharge it needs no patience — the intervention is a cable. One
+box was plugged into USB-C and pulled out again, twice, while the other sat on
+battery as a control:
+
+```
+[  1.3s] Liliana   02 02 e4 01 13      charging
+[ 19.9s] Liliana   02 02 64 01 13      unplugged
+[103.3s] Liliana   02 02 e4 01 13      charging again
+[114.7s] Liliana   02 02 64 01 13      unplugged again
+         Ricki     02 00 64 01 13      control, unchanged throughout
+```
+
+Bit 7 went up on plug-in and down on unplug, both times, on the charging box and
+never on the control. Meanwhile the low seven bits climbed: 96 on battery before
+the cable went in, then 98, 99 and 100 while it was charging. (97 was not seen,
+but the capture didn't start until after the plug-in, so it was most likely just
+missed rather than skipped.) That independently confirms the low bits are a
+charge level, and settles that the gauge tracks upwards as well as down:
+
+```
+   0x60   0 1100000      96%, on battery
+   0xe2   1 1100010      98%, charging
+```
+
+**Mask before you range-check.** A charging device at 98% advertises `0xe2`,
+which is 226. Read whole it is a nonsense percentage; range-checked against 100
+before masking, the whole reading is discarded and the charge disappears from
+your display at precisely the moment a box is plugged in. This is not
+hypothetical — it is the bug the first version of `tentacle-ble` shipped with.
+
 **That the scale is percent is a step less certain.** [inferred] 100 is the
 largest value seen and 96 the smallest, so the top of the range is pinned and
 everything below it is extrapolation. Percent is the natural reading of a gauge
 that stops at 100, but only a real discharge would show whether it reaches 0
 linearly, or at all. Nothing here has seen a box below 96.
 
-**The other four bytes are still unknown.** [unknown] `02 00` and `01 13` were
-identical on both devices and across every capture. That is what a hardware or
-firmware constant looks like — and equally what a field that simply never changed
-looks like. Both boxes report the same firmware and hardware revisions over GATT
-(below), so two of them cannot tell those apart. A device on a different revision
-would.
+**Byte 1 latches on something, and it isn't charging.** [unknown] It read `0x00`
+on both boxes for every capture until one was first plugged in, when it became
+`0x02` — and then stayed `0x02` through both unplugs, while bit 7 of the battery
+byte came straight back down each time. So it isn't a charging flag; it is
+something that got set and did not reset within the observation. "Has been on a
+charger since boot" would fit, and so would several other things. The control box,
+never charged, still reads `0x00`.
 
-Note that a *charging* device was never observed, so nothing is known about
-whether the byte tracks upwards, or whether one of the unexplained bytes carries
-a charging flag.
+**The remaining three bytes are still unknown.** [unknown] `02` at byte 0 and
+`01 13` at bytes 3-4 never moved at all: not between two devices, not across a
+charge, not across the app sync. That is what a hardware or firmware constant
+looks like — and equally what a field that simply never changed looks like. Both
+boxes report the same firmware and hardware revisions over GATT (below), so two
+of them cannot tell those apart. A device on a different revision would.
 
 ### GATT services
 
@@ -441,10 +478,14 @@ Each needs a device the observed one couldn't provide.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.
-- **The other four manufacturer bytes,** `02 00` and `01 13`. Identical on two
-  devices of the same revision, which cannot distinguish a constant from a field
-  that hasn't moved. Compare against a device on a different firmware — and watch
-  them on a device that's charging, which none yet has been.
+- **What byte 1 of the manufacturer record latches on.** `0x00` until a box is
+  first charged, `0x02` from then on, and it did not come back down on unplug the
+  way the charging bit did. Reboot a device that reads `0x02` and see whether it
+  clears; if it does, it's "charged since boot" and not something about the
+  battery.
+- **The remaining manufacturer bytes,** `02` and `01 13`. Unmoved by a second
+  device, a charge cycle and a firmware-level app sync alike. Compare against a
+  device on a different firmware revision.
 - **Date record bytes 2 and 6,** fixed at `00` and `02`. Change the date and see
   what moves.
 - **What byte 1's bits mean.** Answered in the negative — it is not a length —

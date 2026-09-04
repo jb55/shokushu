@@ -11,7 +11,7 @@ written up in [PROTOCOL.md](PROTOCOL.md).
 $ tentacle-ble
 adapter state: PoweredOn — scanning until interrupted
   11:12:00:16.5     25 fps   Ricki     2026-09-04   -43 dBm   100%
-  11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm    96%
+  11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm    96% +
 ```
 
 ```
@@ -61,13 +61,14 @@ Reception is bursty enough that a gap is usually worth waiting out, so the line
 stays, frozen on the last reading that arrived. After thirty seconds of silence
 it goes: by then the box has been switched off rather than merely missed.
 
-The percentage at the end of the line is the battery. The device broadcasts it
-alongside the timecode, in a manufacturer-data field, and it appears once one has
-arrived — a second or two after the line itself, since the two are separate
-advertisements. There is no Battery Service to read over GATT; this is the only
-place a Sync E publishes its charge, and reading it costs nothing, since it is in
-a broadcast that was being listened to anyway. How that was established, and how
-far the scale is actually pinned down, is in [PROTOCOL.md](PROTOCOL.md).
+The percentage at the end of the line is the battery, and a `+` after it means
+the device is on a charger. Both come from a manufacturer-data field the device
+broadcasts alongside the timecode, so they appear a second or two after the line
+itself — the two are separate advertisements. There is no Battery Service to read
+over GATT; this is the only place a Sync E publishes its charge, and reading it
+costs nothing, since it is in a broadcast that was being listened to anyway. How
+that was established, and how far the scale is actually pinned down, is in
+[PROTOCOL.md](PROTOCOL.md).
 
 When there is nothing to show, it says why rather than showing nothing. An
 empty screen used to mean any of three things — no Tentacle in range, a

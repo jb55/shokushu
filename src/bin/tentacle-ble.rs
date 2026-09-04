@@ -69,7 +69,7 @@ struct Seen {
     date: Option<Date>,
     /// Remaining charge, from the manufacturer record — which rides in the same
     /// advertisement as the timecode but arrives as its own event.
-    battery: Option<u8>,
+    battery: Option<ble::Status>,
     /// The local clock this device's advertisements anchor.
     clock: FreeRun,
     /// When this device first sent timecode, which is where its line sits.
@@ -241,7 +241,7 @@ fn decode(
         if let Some(bytes) = manufacturer_data.get(&ble::COMPANY_ID)
             && let Some(status) = ble::parse_manufacturer(bytes)
         {
-            seen.battery = Some(status.battery_percent);
+            seen.battery = Some(status);
         }
         return;
     }
@@ -270,7 +270,7 @@ fn decode(
         Advert::Timecode(tc) => {
             if opt.json {
                 println!(
-                    r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{}}}"#,
+                    r#"{{"timecode":"{tc}","hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{},"fps":{},"device":"{}","date":{},"rssi":{},"battery_percent":{},"charging":{}}}"#,
                     tc.hours,
                     tc.minutes,
                     tc.seconds,
@@ -280,7 +280,11 @@ fn decode(
                     seen.name.as_deref().unwrap_or("<unnamed>"),
                     seen.date.map_or("null".into(), |d| format!("\"{d}\"")),
                     seen.rssi.map_or("null".to_string(), |r| r.to_string()),
-                    seen.battery.map_or("null".to_string(), |b| b.to_string()),
+                    seen
+                        .battery
+                        .map_or("null".to_string(), |b| b.battery_percent.to_string()),
+                    seen.battery
+                        .map_or("null".to_string(), |b| b.charging.to_string()),
                 );
             } else {
                 seen.first_timecode.get_or_insert(arrived);
@@ -301,7 +305,7 @@ struct Row {
     name: String,
     date: Option<Date>,
     rssi: Option<i16>,
-    battery: Option<u8>,
+    battery: Option<ble::Status>,
     note: String,
 }
 
@@ -637,8 +641,16 @@ fn lay_out(mut rows: Vec<Row>) -> Vec<String> {
                 r.name,
                 r.date.map_or(String::new(), |d| format!("   {d}")),
                 r.rssi.map_or(String::new(), |v| format!("   {v} dBm")),
-                // Right-aligned, so 100% and 7% keep the note in one column.
-                r.battery.map_or(String::new(), |v| format!("   {v:>3}%")),
+                // Right-aligned, and the charging marker takes its two columns
+                // whether or not it's showing, so neither a single-digit charge
+                // nor a device on a cable shunts the note sideways.
+                r.battery.map_or(String::new(), |b| {
+                    format!(
+                        "   {:>3}%{}",
+                        b.battery_percent,
+                        if b.charging { " +" } else { "  " }
+                    )
+                }),
                 r.note,
             )
         })
@@ -829,7 +841,7 @@ mod tests {
             name: name.into(),
             date: None,
             rssi: Some(-46),
-            battery: Some(97),
+            battery: Some(ble::Status { battery_percent: 97, charging: false }),
             note: String::new(),
         }
     }
@@ -894,19 +906,33 @@ mod tests {
 
     #[test]
     fn the_battery_column_keeps_its_width_at_every_charge() {
-        // 100% and 7% are three characters apart written plainly, which would
-        // shunt the "no signal" note sideways between one device and the next.
+        // 100% and 7% are three characters apart written plainly, and a charging
+        // marker adds two more, either of which would shunt the "no signal" note
+        // sideways between one device and the next.
         let at = Instant::now();
         let mut full = row((at, "00112233"), "Bob");
-        full.battery = Some(100);
+        full.battery = Some(ble::Status { battery_percent: 100, charging: false });
         let mut low = row((at + Duration::from_secs(1), "aabbccdd"), "Ricki");
         low.name = "Bob".into();
-        low.battery = Some(7);
+        low.battery = Some(ble::Status { battery_percent: 7, charging: true });
 
         let lines = lay_out(vec![full, low]);
         assert!(lines[0].contains("100%"), "{:?}", lines[0]);
         assert!(lines[1].contains("  7%"), "{:?}", lines[1]);
         assert_eq!(lines[0].len(), lines[1].len());
+    }
+
+    #[test]
+    fn a_charging_device_is_marked_and_an_unplugged_one_is_not() {
+        let at = Instant::now();
+        let mut plugged = row((at, "00112233"), "Bob");
+        plugged.battery = Some(ble::Status { battery_percent: 98, charging: true });
+        let mut unplugged = row((at + Duration::from_secs(1), "aabbccdd"), "Bob");
+        unplugged.battery = Some(ble::Status { battery_percent: 98, charging: false });
+
+        let lines = lay_out(vec![plugged, unplugged]);
+        assert!(lines[0].contains("98% +"), "{:?}", lines[0]);
+        assert!(!lines[1].contains('+'), "{:?}", lines[1]);
     }
 
     #[test]

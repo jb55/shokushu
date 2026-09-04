@@ -971,7 +971,7 @@ footer {
         different event to a scanner, which is why it is easy to miss.
       </p>
       <pre>company 0x043f    02 00 64 01 13
-                        ~~ battery</pre>
+                        ~~ battery, with charging in the top bit</pre>
 
       <div class="evidence">
         <div class="claim">Byte 2 is the battery level <span class="badge b-measured">Measured</span></div>
@@ -1001,6 +1001,44 @@ Liliana   02 00 61 01 13      0x61 =  97</pre>
       </div>
 
       <div class="evidence">
+        <div class="claim">Bit 7 of that byte means “charging” <span class="badge b-measured">Measured</span></div>
+        <p>
+          This one was tested properly, because unlike a discharge it needs no
+          patience — the intervention is a cable. One box was plugged into USB-C
+          and pulled out again, twice, while the other sat on battery as a
+          control:
+        </p>
+        <pre>[  1.3s] Liliana   02 02 e4 01 13      charging
+[ 19.9s] Liliana   02 02 64 01 13      unplugged
+[103.3s] Liliana   02 02 e4 01 13      charging again
+[114.7s] Liliana   02 02 64 01 13      unplugged again
+         Ricki     02 00 64 01 13      control, unchanged throughout</pre>
+        <p>
+          Bit 7 went up on plug-in and down on unplug, both times, on the
+          charging box and never on the control. Meanwhile the low seven bits
+          climbed: 96 on battery before the cable went in, then 98, 99 and 100
+          while it was charging. (97 was not seen, but the capture didn't start
+          until after the plug-in, so it was most likely missed rather than
+          skipped.) That independently confirms the low bits are a charge level,
+          and settles that the gauge tracks upwards as well as down.
+        </p>
+        <pre>0x60   0 1100000      96%, on battery
+0xe2   1 1100010      98%, charging</pre>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">Mask before you range-check</div>
+        <p>
+          A charging device at 98% advertises <code>0xe2</code>, which is 226.
+          Read whole it is a nonsense percentage; range-checked against 100
+          <em>before</em> masking, the whole reading is discarded and the charge
+          disappears from your display at precisely the moment a box is plugged
+          in. This is not hypothetical — it is the bug the first version of
+          <code>tentacle-ble</code> shipped with.
+        </p>
+      </div>
+
+      <div class="evidence">
         <div class="claim">That the scale is percent is a step less certain <span class="badge b-inferred">Inferred</span></div>
         <p>
           100 is the largest value seen and 96 the smallest, so the top of the
@@ -1012,16 +1050,27 @@ Liliana   02 00 61 01 13      0x61 =  97</pre>
       </div>
 
       <div class="evidence">
-        <div class="claim">The other four bytes are still unknown <span class="badge b-unknown">Unknown</span></div>
+        <div class="claim">Byte 1 latches on something, and it isn't charging <span class="badge b-unknown">Unknown</span></div>
         <p>
-          <code>02 00</code> and <code>01 13</code> were identical on both
-          devices and across every capture. That is what a hardware or firmware
-          constant looks like — and equally what a field that simply never
-          changed looks like. Both boxes report the same firmware and hardware
-          revisions over GATT, so two of them cannot tell those apart; a device
-          on a different revision would. A <em>charging</em> device was never
-          observed either, so nothing is known about whether the byte tracks
-          upwards or whether one of these bytes carries a charging flag.
+          It read <code>0x00</code> on both boxes for every capture until one was
+          first plugged in, when it became <code>0x02</code> — and then stayed
+          <code>0x02</code> through both unplugs, while bit 7 of the battery byte
+          came straight back down each time. So it isn't a charging flag; it is
+          something that got set and did not reset within the observation. “Has
+          been on a charger since boot” would fit, and so would several other
+          things. The control box, never charged, still reads <code>0x00</code>.
+        </p>
+      </div>
+
+      <div class="evidence">
+        <div class="claim">The remaining three bytes are still unknown <span class="badge b-unknown">Unknown</span></div>
+        <p>
+          <code>02</code> at byte 0 and <code>01 13</code> at bytes 3–4 never
+          moved at all: not between two devices, not across a charge, not across
+          the app sync. That is what a hardware or firmware constant looks like —
+          and equally what a field that simply never changed looks like. Both
+          boxes report the same firmware and hardware revisions over GATT, so two
+          of them cannot tell those apart; a device on a different revision would.
         </p>
       </div>
     </section>
@@ -1227,8 +1276,12 @@ model number         six bytes that aren't text, then a NUL</pre>
                 <td>Run one flat and see whether it reaches 0, and whether it gets there linearly.</td>
               </tr>
               <tr>
-                <td><b>The other four manufacturer bytes</b><br><span style="color:var(--ink-soft)"><code>02 00</code> and <code>01 13</code>, identical on two devices of the same revision — which cannot distinguish a constant from a field that hasn't moved.</span></td>
-                <td>Compare against a device on different firmware, and watch them on one that's charging.</td>
+                <td><b>What byte 1 of the manufacturer record latches on</b><br><span style="color:var(--ink-soft)"><code>0x00</code> until a box is first charged, <code>0x02</code> from then on, and it didn't come back down on unplug the way the charging bit did.</span></td>
+                <td>Reboot a device reading <code>0x02</code> and see whether it clears.</td>
+              </tr>
+              <tr>
+                <td><b>The remaining manufacturer bytes</b><br><span style="color:var(--ink-soft)"><code>02</code> and <code>01 13</code>, unmoved by a second device, a charge cycle and the app sync alike.</span></td>
+                <td>Compare against a device on a different firmware revision.</td>
               </tr>
               <tr>
                 <td><b>Date record bytes 2 and 6</b><br><span style="color:var(--ink-soft)">Fixed at <code>00</code> and <code>02</code>.</span></td>
