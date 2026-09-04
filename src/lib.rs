@@ -9,6 +9,10 @@
 //! [`ble::Scanner`] is the way in if you have a Tentacle and want the time off
 //! it; its module docs have the two ways to read one.
 //!
+//! *shokushu* (触手) is Japanese for tentacle. This is an unofficial,
+//! unaffiliated project: Tentacle Sync GmbH neither endorses nor supports it,
+//! and the hardware is named here only to say what this reads.
+//!
 //! # What needs which feature
 //!
 //! The decoders have no dependencies and are always available: [`ble::parse`]
@@ -20,15 +24,15 @@
 //! features gate:
 //!
 //! - `scan` brings in `btleplug` and a tokio runtime for [`ble::Scanner`].
-//! - `audio` brings in `cpal`, for the `tentacle` binary. There's no library
+//! - `audio` brings in `cpal`, for the `shokushu` binary. There's no library
 //!   audio transport yet.
 //! - `cli` is what the binaries need to be binaries.
 //!
-//! All three are on by default so the binaries build. A library taking the
-//! decoders alone wants `default-features = false`:
+//! None are on by default, so a plain dependency is the decoders alone. Add
+//! back whatever transport you need:
 //!
 //! ```toml
-//! tentacle = { version = "0.1", default-features = false, features = ["scan"] }
+//! shokushu = { version = "0.1", features = ["scan"] }
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

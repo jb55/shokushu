@@ -2,7 +2,7 @@
 //! services expose, and read the standard battery and device-information
 //! characteristics.
 //!
-//! This is the opposite of what `tentacle-ble` does — it pairs nothing but it
+//! This is the opposite of what `shokushu-ble` does — it pairs nothing but it
 //! does open a connection, which can disturb advertising. It exists to answer
 //! whether the battery level is available anywhere other than the manufacturer
 //! advertisement, and is not part of the scanner.
@@ -16,7 +16,7 @@ use btleplug::api::{
 };
 use btleplug::platform::{Manager, PeripheralId};
 use futures::stream::StreamExt;
-use tentacle::ble;
+use shokushu::ble;
 use uuid::Uuid;
 
 /// Standard characteristics worth reading: a battery level and the strings that

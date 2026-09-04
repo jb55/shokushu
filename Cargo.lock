@@ -935,6 +935,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shokushu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "btleplug",
+ "clap",
+ "cpal",
+ "futures",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1004,20 +1018,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tentacle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "btleplug",
- "clap",
- "cpal",
- "futures",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
 ]
 
 [[package]]

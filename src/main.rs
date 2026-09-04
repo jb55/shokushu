@@ -11,7 +11,7 @@ use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, Sample, SampleFormat, SizedSample};
 
-use tentacle::ltc::{DecodedFrame, LtcDecoder};
+use shokushu::ltc::{DecodedFrame, LtcDecoder};
 
 /// How long without a frame before we call it a signal loss.
 const SIGNAL_TIMEOUT: Duration = Duration::from_millis(500);

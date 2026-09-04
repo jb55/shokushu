@@ -323,7 +323,7 @@ charge level, and settles that the gauge tracks upwards as well as down:
 which is 226. Read whole it is a nonsense percentage; range-checked against 100
 before masking, the whole reading is discarded and the charge disappears from
 your display at precisely the moment a box is plugged in. This is not
-hypothetical — it is the bug the first version of `tentacle-ble` shipped with.
+hypothetical — it is the bug the first version of `shokushu-ble` shipped with.
 
 **That the scale is percent is a step less certain.** [inferred] 100 is the
 largest value seen and 96 the smallest, so the top of the range is pinned and
@@ -444,7 +444,7 @@ CoreAudio device ever appears; no CDC, so no `/dev/cu.*` either.
 ## Method
 
 Everything above came from watching advertisements against a device whose
-timecode and date were known, using `tentacle-ble --raw`, which dumps payloads and
+timecode and date were known, using `shokushu-ble --raw`, which dumps payloads and
 marks which bytes changed. Fields announce themselves by how fast they tick: a
 byte changing once a second is seconds, one changing 25 times a second at 25 fps
 is frames.

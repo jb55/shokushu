@@ -1,10 +1,10 @@
 //! Reads timecode off a Tentacle Sync E over Bluetooth LE, without pairing —
 //! the device broadcasts it in its advertisements.
 //!
-//! Everything that talks to the adapter now lives in [`tentacle::ble::scan`];
+//! Everything that talks to the adapter now lives in [`shokushu::ble::scan`];
 //! what's left here is the display. Advertisements arrive only once or twice a
 //! second, so the live display doesn't wait for them: each device keeps a local
-//! clock ([`tentacle::freerun`]) that this samples at [`TICK`], which is what
+//! clock ([`shokushu::freerun`]) that this samples at [`TICK`], which is what
 //! makes the timecode tick smoothly instead of jumping. `--json` is left alone —
 //! it emits the readings that actually arrived, and nothing interpolated.
 //!
@@ -15,13 +15,13 @@
 //! When nothing decodes there is nothing to draw, and a blank screen is the one
 //! thing this must never be: `0xFDAC` service data whose payload has changed
 //! looks exactly like an empty room. So the display says what it is taking in
-//! instead. Which failure it is comes from [`tentacle::ble::diagnostics`]; the
+//! instead. Which failure it is comes from [`shokushu::ble::diagnostics`]; the
 //! wording is [`describe`], and stays here because it names command-line flags
 //! that only exist here.
 //!
 //! `--raw` turns this back into the reconnaissance tool it started as, dumping
 //! advertisement payloads and marking which bytes changed. That's how the
-//! layout in [`tentacle::ble`] was worked out, and it's the way to work out
+//! layout in [`shokushu::ble`] was worked out, and it's the way to work out
 //! anything still unknown — how a 29.97 drop-frame device differs, say.
 
 use std::collections::HashMap;
@@ -31,10 +31,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use btleplug::platform::PeripheralId;
 use clap::Parser;
-use tentacle::ble::diagnostics::Diagnosis;
-use tentacle::ble::{self, Advertisement, Date, Event, Scanner};
-use tentacle::freerun::Reading;
-use tentacle::Timecode;
+use shokushu::ble::diagnostics::Diagnosis;
+use shokushu::ble::{self, Advertisement, Date, Event, Scanner};
+use shokushu::freerun::Reading;
+use shokushu::Timecode;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -69,7 +69,7 @@ const TICK: Duration = Duration::from_millis(20);
 
 /// How long a device that's gone quiet keeps its line.
 ///
-/// Past [`tentacle::freerun::HOLDOVER`] a line freezes on the last reading that
+/// Past [`shokushu::freerun::HOLDOVER`] a line freezes on the last reading that
 /// arrived and counts up, which is worth seeing: reception is bursty and usually
 /// comes back. A box switched off ten minutes ago isn't coming back and
 /// shouldn't still be holding a line, so the line goes once it has been silent
@@ -301,7 +301,7 @@ fn render(
 
 /// One line saying what the scan is taking in, for when none of it decodes.
 ///
-/// The classification is [`tentacle::ble::diagnostics`]'s; the words are this
+/// The classification is [`shokushu::ble::diagnostics`]'s; the words are this
 /// program's, because they name this program's flags. Every case has to point at
 /// something the reader can act on, since the alternative — which is what this
 /// replaced — is a blank screen that means all of them at once.
@@ -510,7 +510,7 @@ fn redraw(lines: &[String], previous: usize) -> String {
 /// frame into a "1.0" that reads as part of the frame number — which barely
 /// showed when this only drew on arriving packets, and showed constantly once it
 /// drew at the frame rate. A received reading can also sit a little past the end
-/// of the frame it names (see [`tentacle::ble`]), so clamp rather than widen.
+/// of the frame it names (see [`shokushu::ble`]), so clamp rather than widen.
 fn tenth(fraction: f64) -> String {
     format!(".{}", (fraction.clamp(0.0, 0.999) * 10.0) as u8)
 }
@@ -621,8 +621,8 @@ fn short_id(id: &PeripheralId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tentacle::ble::diagnostics::{diagnose, survey, Counts};
-    use tentacle::Rate;
+    use shokushu::ble::diagnostics::{diagnose, survey, Counts};
+    use shokushu::Rate;
 
     fn row(order: (Instant, &str), name: &str) -> Row {
         Row {

@@ -11,11 +11,11 @@
 
 use std::time::{Duration, Instant};
 
-use tentacle::ble::{Event, Scanner};
-use tentacle::freerun::Reading;
+use shokushu::ble::{Event, Scanner};
+use shokushu::freerun::Reading;
 
 #[tokio::main]
-async fn main() -> tentacle::Result<()> {
+async fn main() -> shokushu::Result<()> {
     let mut scan = Scanner::start().await?;
     let mut next_poll = Instant::now() + Duration::from_secs(1);
 

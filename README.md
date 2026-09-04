@@ -1,43 +1,47 @@
-# tentacle
+# shokushu
 
-Reads timecode off a Tentacle Sync E, two ways: `tentacle` decodes SMPTE LTC
-from an audio input, and `tentacle-ble` reads it out of the device's Bluetooth
+Reads timecode off a Tentacle Sync E, two ways: `shokushu` decodes SMPTE LTC
+from an audio input, and `shokushu-ble` reads it out of the device's Bluetooth
 advertisements without pairing.
 
 The Bluetooth protocol is undocumented by the vendor; what's known about it is
 written up in [PROTOCOL.md](PROTOCOL.md).
 
+*shokushu* (触手) is Japanese for tentacle. This is an unofficial, unaffiliated
+project: Tentacle Sync GmbH neither endorses nor supports it, and the hardware
+is named here only to say what the thing reads.
+
 ```
-$ tentacle-ble
+$ shokushu-ble
 adapter state: PoweredOn — scanning until interrupted
   11:12:00:16.5     25 fps   Ricki     2026-09-04   -43 dBm   100%
   11:11:44:00.3     25 fps   Liliana   2026-09-04   -51 dBm    96% +
 ```
 
 ```
-$ tentacle
+$ shokushu
 listening on External Microphone (48000 Hz, 1 ch, f32), channel 0
   01:23:45:12   29.97 fps   ub 00000000    -12.4 dBFS
 ```
 
 ```
-$ tentacle --list-devices          # what inputs exist, and their ids
-$ tentacle --device external       # pick one by id or by part of its name
-$ tentacle --channel 1             # decode the right channel of a stereo input
-$ tentacle --json                  # one JSON object per frame, for scripting
+$ shokushu --list-devices          # what inputs exist, and their ids
+$ shokushu --device external       # pick one by id or by part of its name
+$ shokushu --channel 1             # decode the right channel of a stereo input
+$ shokushu --json                  # one JSON object per frame, for scripting
 ```
 
-## tentacle-ble
+## shokushu-ble
 
 The Sync E broadcasts its running timecode continuously, to anyone listening. No
 pairing, no connection, no cable — which makes this the easy route on a Mac, and
 the only one that works with the stock cable.
 
 ```
-$ tentacle-ble                      # live timecode from any Tentacle in range
-$ tentacle-ble --name ricki         # pick a device by name
-$ tentacle-ble --json               # one JSON object per advert, uninterpolated
-$ tentacle-ble --raw                # dump advertisements, marking changed bytes
+$ shokushu-ble                      # live timecode from any Tentacle in range
+$ shokushu-ble --name ricki         # pick a device by name
+$ shokushu-ble --json               # one JSON object per advert, uninterpolated
+$ shokushu-ble --raw                # dump advertisements, marking changed bytes
 ```
 
 Every Tentacle in range gets a line of its own, in the order they first turned
@@ -78,7 +82,7 @@ timecode it reports what it is actually taking in, on stderr, as a single line
 that updates in place:
 
 ```
-$ tentacle-ble
+$ shokushu-ble
 adapter state: PoweredOn — scanning until interrupted
 no timecode: 2 devices advertising 0xFDAC, but 22 of 22 payloads did not decode — Liliana last sent 22 7d 19 0b 3b 13 00 93 bf (--raw -a dumps them all; see PROTOCOL.md)
 ```
@@ -138,15 +142,15 @@ valid BCD; the date record, inconsistently, *is* BCD. And **the frame rate
 arrives as a whole number**, so 29.97 and 30 are indistinguishable over the air
 and no drop-frame flag is broadcast at all. Only 25 fps has ever been observed.
 
-### tentacle-probe
+### shokushu-probe
 
-Everything above listens and never transmits. `tentacle-probe` is the exception,
+Everything above listens and never transmits. `shokushu-probe` is the exception,
 and is kept separate for that reason: it connects to each Tentacle in range,
 lists its GATT services and characteristics, and reads the standard Device
 Information and battery ones.
 
 ```
-$ tentacle-probe
+$ shokushu-probe
 === Ricki  [7806a574-7711-abac-3737-c42b79c16804]
   00002a29-…  (manufacturer name)   = "Tentacle Sync GmbH"
   00002a27-…  (hardware revision)   = "1.2 SYNCE2"
@@ -170,7 +174,7 @@ There are two ways to read it, and both are wanted. Events tell you what
 arrived:
 
 ```rust
-use tentacle::ble::{Event, Scanner};
+use shokushu::ble::{Event, Scanner};
 
 let mut scan = Scanner::builder().name("ricki").start().await?;
 while let Some(event) = scan.next().await {
@@ -184,7 +188,7 @@ while let Some(event) = scan.next().await {
 
 The clocks tell you what time it is *now*, which is a different question.
 Advertisements land once or twice a second, so anything drawing at its own
-refresh rate wants this one — it's what `tentacle-ble` draws from:
+refresh rate wants this one — it's what `shokushu-ble` draws from:
 
 ```rust
 for device in scan.devices() {
@@ -201,7 +205,7 @@ for device in scan.devices() {
 When nothing decodes, `scan.diagnosis()` says which of the failures it is —
 nothing in range, something in range whose payload no longer decodes, or a scan
 delivering nothing at all. It carries the counts and no wording, because the
-sentence that suits a terminal names flags a GUI hasn't got; `tentacle-ble`
+sentence that suits a terminal names flags a GUI hasn't got; `shokushu-ble`
 writes its own.
 
 ### Features
@@ -213,25 +217,25 @@ hold of the bytes is what costs something, and that is what the features gate �
 `scan` for Bluetooth (`btleplug` and a tokio runtime), `audio` for the LTC
 binary's input (`cpal`), `cli` for the binaries.
 
-None are on by default, so `cargo add tentacle` is the decoders alone — no
+None are on by default, so `cargo add shokushu` is the decoders alone — no
 transport, no dependencies at all:
 
 ```toml
-tentacle = "0.1"
+shokushu = "0.1"
 ```
 
 Reading Bluetooth, without compiling an audio stack:
 
 ```toml
-tentacle = { version = "0.1", features = ["scan"] }
+shokushu = { version = "0.1", features = ["scan"] }
 ```
 
 The binaries in this repo declare the features they need, so running one from a
 checkout names them:
 
 ```
-cargo run --features scan,cli --bin tentacle-ble
-cargo run --features audio,cli --bin tentacle
+cargo run --features scan,cli --bin shokushu-ble
+cargo run --features audio,cli --bin shokushu
 ```
 
 ### Timecode

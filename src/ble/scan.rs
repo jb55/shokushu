@@ -16,9 +16,9 @@
 //! anyone reads the event.
 //!
 //! ```no_run
-//! use tentacle::ble::{Event, Scanner};
+//! use shokushu::ble::{Event, Scanner};
 //!
-//! # async fn run() -> tentacle::Result<()> {
+//! # async fn run() -> shokushu::Result<()> {
 //! let mut scan = Scanner::builder().name("ricki").start().await?;
 //! while let Some(event) = scan.next().await {
 //!     if let Event::Timecode { timecode, .. } = event {
@@ -31,7 +31,7 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use tentacle::ble::Scanner;
+//! # use shokushu::ble::Scanner;
 //! # async fn run(scan: &mut Scanner) {
 //! for device in scan.devices() {
 //!     if let Some(reading) = device.reading(Instant::now()) {

@@ -1,21 +1,21 @@
 [package]
-name = "tentacle"
+name = "shokushu"
 version = "0.1.0"
 edition = "2024"
 
 [features]
-# Nothing on. A `cargo add tentacle` gets the decoders and no dependencies at
+# Nothing on. A `cargo add shokushu` gets the decoders and no dependencies at
 # all — reading an advertisement shouldn't compile a Bluetooth stack, let alone
 # an audio one. The cost lands on this repo instead: the binaries declare their
 # `required-features`, so building or running one here names them
-# (`cargo run --features scan,cli --bin tentacle-ble`).
+# (`cargo run --features scan,cli --bin shokushu-ble`).
 default = []
 
 # The Bluetooth transport: `ble::Scanner`, `ble::Device`, `ble::diagnostics`.
 # Parsing an advertisement needs none of it — `ble::parse` is always available.
 scan = ["dep:btleplug", "dep:futures", "dep:tokio", "dep:uuid", "dep:thiserror"]
 
-# The audio input the `tentacle` binary decodes LTC from. There is no library
+# The audio input the `shokushu` binary decodes LTC from. There is no library
 # transport for it yet, so this is the binary's dependency and nothing else's;
 # `ltc::LtcDecoder` is always available and takes samples from wherever you got
 # them.
@@ -39,18 +39,18 @@ tokio = { version = "1.53.1", features = [
 uuid = { version = "1.26.0", optional = true }
 
 [[bin]]
-name = "tentacle"
+name = "shokushu"
 path = "src/main.rs"
 required-features = ["audio", "cli"]
 
 [[bin]]
-name = "tentacle-ble"
-path = "src/bin/tentacle-ble.rs"
+name = "shokushu-ble"
+path = "src/bin/shokushu-ble.rs"
 required-features = ["scan", "cli"]
 
 [[bin]]
-name = "tentacle-probe"
-path = "src/bin/tentacle-probe.rs"
+name = "shokushu-probe"
+path = "src/bin/shokushu-probe.rs"
 required-features = ["scan", "cli"]
 
 [[example]]
