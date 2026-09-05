@@ -82,6 +82,13 @@
 //! audio samples into frames, and [`freerun`] turns either into a clock. None
 //! of them do any I/O, so none of them can fail.
 //!
+//! [`jam`] is in the same position and for the same reason. It is arithmetic
+//! over samples somebody else collected — it measures how far behind a device's
+//! own clock a reading lands, so that [`freerun::FreeRun::jam`] can take the
+//! constant back off — and it needs no Bluetooth to do it. Taking the samples
+//! does: `shokushu-gatt --phase` is what collects them, and that binary needs
+//! `scan` and `cli` like the rest.
+//!
 //! Getting hold of the bytes is what costs something, and that's what the
 //! features gate:
 //!
@@ -101,6 +108,7 @@
 
 pub mod ble;
 pub mod freerun;
+pub mod jam;
 pub mod ltc;
 pub mod timecode;
 

@@ -60,6 +60,7 @@ use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use clap::Parser;
 use futures::stream::StreamExt;
 use shokushu::ble::{self, Advert};
+use shokushu::jam::{Calibrator, Link};
 use shokushu::Timecode;
 use uuid::Uuid;
 
@@ -233,6 +234,9 @@ async fn listen(
         // Opened before the first connect, so a run that cannot write its
         // samples fails now rather than after minutes of collecting them.
         phase: opt.phase.as_deref().map(Phase::new).transpose()?,
+        // Shares `overall` with the file, so the two timelines agree and a
+        // report printed here can be checked against the capture it came from.
+        calibrate: opt.phase.is_some().then(|| Calibrator::since(overall)),
         ..Default::default()
     };
     let mut peripheral = central.peripheral(id).await?;
@@ -298,6 +302,17 @@ async fn listen(
     }
     eprintln!("disconnected");
     println!("\n{}", run.summarise(overall.elapsed()));
+    // The capture file is written in full either way, which is the split worth
+    // keeping: a tool warns and still records, because a half-spoiled capture
+    // holds real samples; the harness refuses, because by then there is nothing
+    // left to salvage by carrying on.
+    if let Some(cal) = &run.calibrate {
+        println!("\n=== what the round trips say");
+        match cal.finish() {
+            Ok(done) => println!("\n{done}"),
+            Err(flaw) => println!("\nnothing can be calibrated from this capture: {flaw}"),
+        }
+    }
     Ok(())
 }
 
@@ -535,6 +550,12 @@ async fn converse(
                 if let Some(phase) = &mut run.phase {
                     phase.one_way("notify", overall, at, vendor_timecode(&note.value));
                 }
+                if let Some(cal) = &mut run.calibrate {
+                    match vendor_timecode(&note.value) {
+                        Some(tc) => cal.notification(&tc, at),
+                        None => cal.undecoded(),
+                    }
+                }
                 println!(
                     "[{:7.3}s] NOTIFY {}  {}{}",
                     overall.elapsed().as_secs_f64(),
@@ -556,6 +577,12 @@ async fn converse(
                         Ok(bytes) => {
                             if let Some(phase) = &mut run.phase {
                                 phase.round_trip(overall, t0, t1, &bytes);
+                            }
+                            if let Some(cal) = &mut run.calibrate {
+                                match vendor_timecode(&bytes) {
+                                    Some(tc) => cal.round_trip(&tc, t0, t1),
+                                    None => cal.undecoded(),
+                                }
                             }
                             run.polls.entry(ch.uuid).or_default().add(&bytes);
                             lived = start.elapsed();
@@ -698,6 +725,11 @@ struct Run {
     adverts: usize,
     /// Where `--phase` samples go, if it was asked for.
     phase: Option<Phase>,
+    /// The same samples, reduced in process, so a `--phase` run answers the
+    /// question at the end instead of only writing the file that could.
+    /// `analysis/gatt_phase.py` still reduces the file offline; this is the
+    /// same arithmetic with tests around it.
+    calibrate: Option<Calibrator>,
 }
 
 impl Run {
@@ -706,13 +738,23 @@ impl Run {
     /// Called from inside a session and from the gap between two, which is the
     /// point: see `Phase::advert`.
     fn note_advert(&mut self, event: &CentralEvent, at: Instant, overall: &Instant, connected: bool) {
-        let Some(phase) = &mut self.phase else {
-            return;
-        };
         let Some(tc) = advert_timecode(event) else {
             return;
         };
-        phase.advert(overall, at, Some(tc), connected);
+        if let Some(phase) = &mut self.phase {
+            phase.advert(overall, at, Some(tc), connected);
+        }
+        // Whether a link was up is the whole reason this is recorded at all: a
+        // connected box's advertisements land about 9.5 ms later against its
+        // own stamp, and pooling the two populations is how the first answer
+        // to this came out wrong.
+        if let Some(cal) = &mut self.calibrate {
+            let link = match connected {
+                true => Link::Up,
+                false => Link::Down,
+            };
+            cal.advert(&tc, at, link);
+        }
     }
 
     /// Log a read, but only when it differs from the last one logged. A

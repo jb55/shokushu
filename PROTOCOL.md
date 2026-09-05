@@ -1054,18 +1054,32 @@ Each needs a device the observed one couldn't provide.
   Note that the round-trip measurement above does not settle this: it bounds the
   *total* a reading is behind by, this bias included, and deliberately does not
   take the total apart.
-- **How much of the advertisement's 6–9 ms is flight and how much is origin.**
+- **How much of the advertisement's staleness is flight and how much is origin.**
   The round trip bounds the sum and cannot split it, because both halves are
   fixed and a bracket only ever sees the sum. Splitting them wants a second
   transport whose latency is independently calibratable, which is what LTC on
   the audio output is: sample-accurate, and measurable end to end against a
   known signal. Read LTC and BLE off the same box at once and the audio path
   becomes the reference. Blocked on an input — see **Getting it into a Mac**.
-- **Tightening the advertisement floor.** The 5.9 ms low end is a minimum over
-  157 samples and was still falling when the capture ended, so the true figure
-  is below it. A connected box advertises at 0.6/s, which is what makes this
-  slow; the honest fix is a much longer capture rather than a cleverer estimator,
-  since a minimum has no unbiased form to reach for.
+- **Tightening the advertisement floor.** The free-running figure reads zero at
+  its low end by construction rather than by measurement, so what is quoted is
+  its upper end, and that end is the bracket — which the 30 ms connection
+  interval floors and macOS gives no way to shorten. The honest fix is not a
+  cleverer estimator, since a minimum has no unbiased form to reach for; it is
+  either a much longer capture or a transport that is not Bluetooth.
+- **Whether connecting to a box knocks it off a shared timeline.** [unknown]
+  Two boxes have been observed out of sync after sessions of GATT work, and
+  nothing here writes to a box — `0dab17e4` is left alone and an ATT read is
+  what the round trips use. Three candidates, none tested. A connection could be
+  re-jamming the box, though the evidence is against it: `0dab1280` holds the
+  time of the last sync and stayed byte-identical across 50 reads in one run and
+  82 in another, over many reconnects. Or the recovery could be the cause rather
+  than the connection — a box wedged by rapid reconnects, then power-cycled,
+  comes back unjammed. Or it could be ordinary drift, since two boxes 8.6 ppm
+  apart separate by 0.74 s a day, about 18 frames at 24 fps. The clean test is
+  differential and cheap: measure two boxes' offset against each other
+  passively, where the host clock cancels, connect once to one of them, and see
+  whether that offset moved.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.

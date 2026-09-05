@@ -551,9 +551,80 @@ impl Drift {
 #[derive(Debug, Default)]
 pub struct FreeRun {
     state: Option<State>,
+    /// How far behind the device's own clock a reading is by the time it lands.
+    /// Zero until [`FreeRun::jam`] is told otherwise, which is the behaviour
+    /// every clock here had before there was anything to tell it.
+    offset: Duration,
 }
 
 impl FreeRun {
+    /// Applies a calibrated path constant, so anchors land where the device
+    /// actually was rather than where the reading said.
+    ///
+    /// A reading is stale by the time it arrives: it crossed the air and
+    /// climbed this host's Bluetooth stack, and the device's microsecond
+    /// counter has a bias in its origin besides. Both are fixed, both are
+    /// inside one number, and [`jam::Calibration::offset`](crate::jam::Calibration::offset)
+    /// measures it. With one applied, every anchor is advanced by it before the
+    /// model sees it.
+    ///
+    /// # This is a path constant, and it does not decay
+    ///
+    /// A timecode box jam syncs from a master and then free-runs, drifting
+    /// away from it as the two crystals disagree. **This is not that.** What is
+    /// calibrated here is not the time — it is the latency of the path the time
+    /// arrives on, and a path constant does not drift with the crystals. The
+    /// time itself keeps arriving, in every advertisement, exactly as it did
+    /// before. So this is *calibrate once, then track*: there is nothing here
+    /// that goes stale and nothing that needs redoing as a run goes on.
+    ///
+    /// It is also not a time transfer. Applying it does not make the clock
+    /// right; it removes a known, measured, fixed error from it and leaves the
+    /// rest, which is the bracket the measurement could not close — see
+    /// [`jam::Calibration::bracket_width`](crate::jam::Calibration::bracket_width).
+    /// Expect the worst case to halve rather than vanish.
+    ///
+    /// # Changing it mid-run
+    ///
+    /// Allowed, and cheap. A new constant steps the model by the difference,
+    /// which is a couple of milliseconds at most — well inside what the slew
+    /// loop absorbs without the display ticking backwards, since
+    /// [`sample`](FreeRun::sample) never hands out a position below the last
+    /// one it gave. It does not reseat the clock or throw away the measured
+    /// rate.
+    ///
+    /// # Where it deliberately does not apply
+    ///
+    /// [`last_received`](FreeRun::last_received) stays raw. Its job is to hand
+    /// back the frame the device sent, and the constant belongs to the path
+    /// rather than to the device — folding it in there would make an
+    /// un-smoothed reading into a corrected one, which is the one thing that
+    /// method exists not to be.
+    ///
+    /// # Whether to bother
+    ///
+    /// Usually not, and [`jam`](crate::jam) says so at more length. The
+    /// constant is about 0.05 of a frame at 24 fps and applying it leaves
+    /// 0.025, where half a frame is what it takes to change a displayed frame
+    /// number — and it cancels entirely out of a drift measurement or a
+    /// comparison between two boxes, since both take the same path to this
+    /// host. Reach for it when the host clock has to agree with the device's
+    /// absolute time to well under a frame, and expect LTC to be the real
+    /// answer if it has to agree to well under a millisecond.
+    ///
+    /// Taking the samples needs Bluetooth — `shokushu-gatt --phase` collects
+    /// them — while the arithmetic in [`jam`](crate::jam) needs none and is
+    /// always available.
+    pub fn jam(&mut self, offset: Duration) {
+        self.offset = offset;
+    }
+
+    /// The path constant currently being applied. Zero unless
+    /// [`jam`](FreeRun::jam) has set one.
+    pub fn offset(&self) -> Duration {
+        self.offset
+    }
+
     /// Takes an advertisement as an anchor.
     ///
     /// `at` wants to be when the packet arrived rather than whenever it's
@@ -602,10 +673,17 @@ impl FreeRun {
     /// [`sample`](FreeRun::sample), or let the [`ble`](crate::ble) scanner's
     /// `Event::Lost` tell you.
     pub fn anchor(&mut self, tc: &Timecode, at: Instant) {
+        // Where the device actually was when this reading landed, as against
+        // where the reading says it was: the two differ by however long the
+        // packet took to get here, which is what `jam` calibrates. Computed
+        // before the model is borrowed, and used everywhere below in place of
+        // the raw position. The nominal rate is the right multiplier because it
+        // is what `frame_position` counts in.
+        let reported = tc.frame_position() + self.offset.as_secs_f64() * tc.rate.fps as f64;
         let Some(state) = &mut self.state else {
             self.state = Some(State::new(
                 tc,
-                tc.frame_position(),
+                reported,
                 at,
                 RateEstimate::nominal(tc.rate),
             ));
@@ -616,7 +694,7 @@ impl FreeRun {
             // reconfigured; nothing learned so far still applies.
             self.state = Some(State::new(
                 tc,
-                tc.frame_position(),
+                reported,
                 at,
                 RateEstimate::nominal(tc.rate),
             ));
@@ -630,7 +708,7 @@ impl FreeRun {
         // enough silence the model's prediction is meaningless.
         if at.saturating_duration_since(state.anchored) > HOLDOVER {
             let rate = state.rate;
-            let position = unwrap_day(tc.frame_position(), state.extrapolate(at), tc.rate);
+            let position = unwrap_day(reported, state.extrapolate(at), tc.rate);
             self.state = Some(State::new(tc, position, at, rate));
             return;
         }
@@ -647,7 +725,7 @@ impl FreeRun {
         }
 
         let predicted = state.extrapolate(at);
-        let position = unwrap_day(tc.frame_position(), predicted, tc.rate);
+        let position = unwrap_day(reported, predicted, tc.rate);
         let error = position - predicted;
 
         // A timecode set on the device is a genuine discontinuity, and waiting
@@ -970,6 +1048,63 @@ mod tests {
             clamped: false,
             measurements: 10,
         }
+    }
+
+    #[test]
+    fn a_jammed_clock_leads_an_unjammed_one_by_the_path_constant() {
+        let now = Instant::now();
+        let tc = at(36_000.0);
+
+        let mut raw = FreeRun::default();
+        raw.anchor(&tc, now);
+
+        let mut jammed = FreeRun::default();
+        jammed.jam(millis(10));
+        jammed.anchor(&tc, now);
+
+        // The reading said 10:00:00:00, but by the time it landed the device
+        // had already moved on by the path's constant, so that is where the
+        // jammed clock puts it.
+        let lead = seconds_shown(&mut jammed, now) - seconds_shown(&mut raw, now);
+        assert!(
+            (lead - 0.010).abs() < 1e-9,
+            "jammed clock leads by {lead:.6} s, wanted 0.010"
+        );
+        assert_eq!(jammed.offset(), millis(10));
+        assert_eq!(raw.offset(), Duration::ZERO);
+
+        // The constant belongs to the path and not to the device, so what the
+        // device actually sent is left alone.
+        assert_eq!(raw.last_received(), jammed.last_received());
+        assert_eq!(jammed.last_received(), Some(tc));
+    }
+
+    #[test]
+    fn changing_the_constant_mid_run_steps_the_model_and_nothing_else() {
+        let start = Instant::now();
+        let mut clock = FreeRun::default();
+        clock.anchor(&at(36_000.0), start);
+        // A baseline's worth of anchors, so there is a measured rate to lose.
+        for step in 1..=8 {
+            let now = start + millis(step * 3_000);
+            clock.anchor(&at(36_000.0 + step as f64 * 3.0), now);
+        }
+        let before = clock.drift();
+        let then = start + millis(24_000);
+        let position = seconds_shown(&mut clock, then);
+
+        clock.jam(millis(2));
+        let after = seconds_shown(&mut clock, then + millis(1));
+
+        // Two milliseconds is well under a frame, so the step is absorbed
+        // rather than snapped to — and the clock never ticks backwards.
+        assert!(
+            after >= position && after - position < FRAME,
+            "stepped by {:.6} s, which a slew should have absorbed",
+            after - position
+        );
+        // It is not a reseat: the measured rate survives.
+        assert_eq!(clock.drift().map(|d| d.measurements), before.map(|d| d.measurements));
     }
 
     #[test]

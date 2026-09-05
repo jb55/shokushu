@@ -2063,6 +2063,10 @@ Liliana   (zeros)              ->   04 09 1a  0c 2f 14      4 Sep 26,           
                 <td><b>Whether the connection would live longer if the client wrote something</b><br><span style="color:var(--ink-soft)">The box hangs up after about 6.6 s regardless of what a read-only client does.</span></td>
                 <td>A keepalive on the write characteristic is a plausible reason the app doesn't suffer this; a sniffer capture would show it.</td>
               </tr>
+              <tr>
+                <td><b>Whether connecting to a box knocks it off a shared timeline</b><br><span style="color:var(--ink-soft)">Two boxes have been seen out of sync after sessions of GATT work, and nothing here writes to a box. Three candidates, none tested: a connection re-jamming it, though <code>0dab1280</code> holds the last sync time and stayed byte-identical across many reconnects, which argues against; the recovery rather than the connection, since a box wedged by rapid reconnects and then power-cycled comes back unjammed; or ordinary drift, two boxes 8.6 ppm apart separating by 0.74 s a day.</span></td>
+                <td>Measure two boxes' offset against each other passively, where the host clock cancels, connect once to one of them, and see whether that offset moved.</td>
+              </tr>
             </tbody>
           </table>
         </div>
