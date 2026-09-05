@@ -130,6 +130,9 @@ use crate::timecode::{Rate, Timecode};
 pub mod diagnostics;
 #[cfg(feature = "scan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "scan")))]
+pub mod jam;
+#[cfg(feature = "scan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scan")))]
 pub mod scan;
 
 #[cfg(feature = "scan")]

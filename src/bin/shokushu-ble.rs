@@ -47,6 +47,50 @@
 //! included, neither of them a reference. It says the two disagree, never which
 //! of them is right.
 //!
+//! # `--jam` connects, and nothing else here ever has
+//!
+//! This tool has been passive since it was written, deliberately: connecting
+//! disturbs a box's advertising and the crate keeps it in `shokushu-gatt` and
+//! `shokushu-probe` for that reason. **`--jam` breaks that rule**, and it is the
+//! only thing here that does. It opens **one** connection to **one** box before
+//! the display starts, takes about a hundred ATT round trips over the six and a
+//! half seconds the box allows, hangs up, and never connects again — then feeds
+//! that box's ordinary advertisements into the same estimator as the display
+//! runs. [`shokushu::ble::jam`] has the method and what one connection can and
+//! cannot buy.
+//!
+//! Two reasons to know that rather than discover it. A connected box advertises
+//! at about a third the rate, so for those seven seconds the box being measured
+//! is *worse* on screen than the ones beside it. And boxes stop accepting
+//! connections after a few dozen rapid ones, so `--jam` is not a flag to leave
+//! on in a shell loop. `--phase` below is the way to avoid re-measuring.
+//!
+//! What it buys is small and worth saying plainly: a free-running clock is
+//! already within about 2.09 ms of the device, and applying the constant halves
+//! the worst case. That is 0.025 of a frame at 24 fps against 0.05, where half
+//! a frame — 20.8 ms — is what it takes to change a displayed frame number. The
+//! bracket is floored by the 30 ms connection interval and macOS gives no way
+//! to negotiate a shorter one. Sub-millisecond wants LTC, not this.
+//!
+//! `--phase MS` applies a constant that was measured earlier, and **connects to
+//! nothing**. It is the passive half of `--jam`: calibrate once, note the
+//! number the report prints, and every run after that is a passive scan again
+//! with the correction still on. It is also what to reach for after a box has
+//! been re-synced by hand, since a jam sync moves the box's clock and not the
+//! path the readings travel — the path constant is still the one that was
+//! measured.
+//!
+//! One box, several on screen. A calibration is taken against a single box, and
+//! `--jam` applies it to that box alone; the others keep showing what they
+//! actually broadcast. Part of the constant is this host's Bluetooth stack
+//! floor, which every box in the room shares, and part is the bias in the
+//! origin of that box's microsecond counter, which they may not — `PROTOCOL.md`
+//! records that bias as a few milliseconds of unknown origin, measured on one
+//! unit. Unknown origin is not the same as shared, so it is not assumed.
+//! `--phase` is the other choice: an explicitly given number is applied to every
+//! box on screen, because at that point spreading it is the operator's call and
+//! not this program's. `--name` narrows what "every box" means.
+//!
 //! `--raw` turns this back into the reconnaissance tool it started as, dumping
 //! advertisement payloads and marking which bytes changed. That's how the
 //! layout in [`shokushu::ble`] was worked out, and it's the way to work out
@@ -60,6 +104,7 @@ use anyhow::Result;
 use btleplug::platform::PeripheralId;
 use clap::Parser;
 use shokushu::ble::diagnostics::Diagnosis;
+use shokushu::ble::jam::{Calibrate, Pass};
 use shokushu::ble::{self, Advertisement, Date, Event, Scanner};
 use shokushu::freerun::{Drift, Reading};
 use shokushu::{Rate, Timecode};
@@ -94,6 +139,42 @@ struct Opt {
     /// `!` one the model has stopped believing.
     #[arg(long)]
     drift: bool,
+
+    /// Measure the path constant first, then show that box's clock with it
+    /// applied. UNLIKE EVERY OTHER FLAG HERE THIS CONNECTS: one connection of
+    /// about 7s to one box, before the display starts, and never again. Use
+    /// --name to choose which box. It buys about 1ms, which is 0.025 of a frame
+    /// at 24fps; note the number it prints and use --phase after that.
+    #[arg(long, conflicts_with = "phase")]
+    jam: bool,
+
+    /// Apply an already-measured path constant, in milliseconds, connecting to
+    /// nothing. The passive half of --jam: run --jam once, note the offset it
+    /// reports, and pass it here forever after. Applied to every box on screen,
+    /// which --name narrows.
+    #[arg(long, value_name = "MS")]
+    phase: Option<f64>,
+}
+
+/// A `--phase` figure as a duration, or a reason it isn't one.
+///
+/// Rejected rather than clamped. A negative constant would say a reading
+/// arrived before the device stamped it, and `Duration::from_secs_f64` panics
+/// on one — but the real argument is that a sign slip is a typo and running on
+/// anyway would hide it. The upper bound is a sanity rail at half a second: the
+/// quantity is a couple of milliseconds and nothing measured here has ever been
+/// near it, so a larger number is a unit mix-up rather than a measurement.
+fn phase_offset(ms: f64) -> Result<Duration> {
+    if !ms.is_finite() || ms < 0.0 {
+        anyhow::bail!("--phase wants a path delay in milliseconds, and {ms} is not one");
+    }
+    if ms > 500.0 {
+        anyhow::bail!(
+            "--phase {ms} ms is far larger than any path constant measured here \
+             (a couple of milliseconds) — is that seconds?"
+        );
+    }
+    Ok(Duration::from_secs_f64(ms / 1e3))
 }
 
 /// How often to redraw the live display. Comfortably above any frame rate a
@@ -134,9 +215,27 @@ enum Step {
     Took(Event),
 }
 
+/// How many free-running advertisements before `--jam` starts asking whether
+/// the answer has settled.
+///
+/// `Calibration::settled` reads the last two steps of a six-step convergence,
+/// so there has to be enough to make six steps of before the question means
+/// anything. Twenty is a dozen seconds of listening.
+const SETTLE_AFTER: usize = 20;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Opt::parse();
+    let phase = opt.phase.map(phase_offset).transpose()?;
+
+    // Before the scanner, and only with --jam: the one connection this program
+    // ever opens. It has to be over before the display's scan starts, since
+    // holding a scan up through a connect drops the link during service
+    // discovery every time on macOS.
+    let mut pass = match opt.jam {
+        true => Some(calibrate(&opt).await?),
+        false => None,
+    };
 
     let mut builder = Scanner::builder();
     if let Some(name) = &opt.name {
@@ -199,13 +298,31 @@ async fn main() -> Result<()> {
                 start.elapsed(),
                 opt.drift,
             ),
-            Step::Took(event) if opt.raw => {
-                report_raw(&opt, &mut raw, &scan, start.elapsed().as_secs_f64(), event)
+            Step::Took(event) => {
+                // A constant given on the command line goes on every clock the
+                // scan keeps, as it turns up. Cheap, and idempotent — the
+                // device is only touched when its clock disagrees.
+                if let Some(offset) = phase
+                    && let Some(device) = scan.device_mut(event.id())
+                    && device.offset() != offset
+                {
+                    device.jam(offset);
+                }
+                // A measured one goes on the box it was measured on, once the
+                // advertisement floor has stopped moving. Printing the report
+                // scrolls the display, so the redraw is told to start over.
+                if collect(&mut pass, &mut scan, &event) {
+                    drawn = 0;
+                }
+
+                if opt.raw {
+                    report_raw(&opt, &mut raw, &scan, start.elapsed().as_secs_f64(), event);
+                } else if opt.json {
+                    report_json(&scan, start, &event);
+                }
+                // Otherwise nothing: the scanner has already anchored the clock
+                // this event carried, and `render` draws on its own schedule.
             }
-            Step::Took(event) if opt.json => report_json(&scan, start, &event),
-            // Nothing to do with it here: the scanner has already anchored the
-            // clock this event carried, and `render` draws on its own schedule.
-            Step::Took(_) => {}
         }
     }
 
@@ -217,6 +334,113 @@ async fn main() -> Result<()> {
     // prompt land on top of the last thing we said.
     notice.finish();
     Ok(())
+}
+
+/// The `--jam` connection: find a box, take round trips off it, hang up.
+///
+/// Everything said here goes to stderr, because stdout is the display's and
+/// this runs before the display exists. It is worth saying: the box is off the
+/// air for the seven seconds this takes, and somebody watching an empty screen
+/// should know why.
+async fn calibrate(opt: &Opt) -> Result<Pass> {
+    let mut calibrate = Calibrate::new();
+    if let Some(name) = &opt.name {
+        calibrate = calibrate.name(name);
+    }
+    eprintln!(
+        "--jam: opening one connection to take round trips{}. This is the only \
+         time this program connects to anything.",
+        match &opt.name {
+            Some(n) => format!(" from the box named like {n:?}"),
+            None => ", from the first Tentacle that answers".to_string(),
+        }
+    );
+
+    let pass = calibrate.run().await?;
+    eprintln!(
+        "--jam: {} round trip(s) off {} in {:.1}s, disconnected. Now listening \
+         for its advertisements for up to {:.0}s.",
+        pass.round_trips(),
+        pass.name(),
+        pass.connected_for().as_secs_f64(),
+        pass.closes_at()
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64(),
+    );
+    // Not fatal. The display is the point of the program and it works
+    // uncorrected; a run that connected and got nothing should say so and carry
+    // on, not exit.
+    if pass.round_trips() == 0 {
+        eprintln!(
+            "--jam: the connection returned no readable timecode, so there is \
+             nothing to calibrate from. Carrying on uncorrected."
+        );
+    }
+    Ok(pass)
+}
+
+/// Feeds one event to a running `--jam` pass, and applies the answer when there
+/// is one.
+///
+/// Returns whether anything was printed, since that scrolls the display and the
+/// redraw has to be told.
+///
+/// Only the box the round trips came off is fed. Another Tentacle on the same
+/// timeline is a second unknown offset, not a second reading of this one — and
+/// its advertisements would be pooled into a floor that means nothing.
+fn collect(pass: &mut Option<Pass>, scan: &mut Scanner, event: &Event) -> bool {
+    let Some(running) = pass else { return false };
+
+    if let Event::Timecode { id, timecode, at } = event
+        && id == running.device()
+    {
+        running.advert(timecode, *at);
+    }
+
+    let now = Instant::now();
+    let expired = !running.open(now);
+    if running.adverts() < SETTLE_AFTER && !expired {
+        return false;
+    }
+
+    match running.finish() {
+        // Settled, or out of time and this is as good as it gets. Applying an
+        // unsettled figure is still worth doing — the floor only falls, so an
+        // unsettled one is an under-correction — but it gets said.
+        Ok(done) if done.settled() || expired => {
+            eprintln!("\n=== --jam: what the round trips say, for {}\n", running.name());
+            eprint!("{done}");
+            match scan.device_mut(running.device()) {
+                Some(device) => {
+                    device.jam(done.offset());
+                    eprintln!(
+                        "\napplied {:.3} ms to {} and to no other box on screen; see the \
+                         module docs for why that is not assumed to carry across.",
+                        done.offset().as_secs_f64() * 1e3,
+                        running.name(),
+                    );
+                }
+                // It advertised enough to calibrate from, so this is a device
+                // that has since gone quiet rather than one that never existed.
+                None => eprintln!(
+                    "\n{} is no longer in this scan, so the {:.3} ms went nowhere.",
+                    running.name(),
+                    done.offset().as_secs_f64() * 1e3,
+                ),
+            }
+            *pass = None;
+            true
+        }
+        Ok(_) => false,
+        Err(flaw) if expired => {
+            eprintln!("\n--jam: nothing can be calibrated from this pass: {flaw}");
+            *pass = None;
+            true
+        }
+        // Before the window is out, a refusal is usually just "no
+        // advertisements yet", which is what a pass in progress honestly is.
+        Err(_) => false,
+    }
 }
 
 /// One JSON object per reading that actually arrived, uninterpolated.
@@ -794,6 +1018,32 @@ mod tests {
             drift: None,
             note: String::new(),
         }
+    }
+
+    #[test]
+    fn a_phase_constant_is_read_as_milliseconds() {
+        // The number --jam prints, handed straight back.
+        assert_eq!(phase_offset(1.045).unwrap(), Duration::from_micros(1045));
+        assert_eq!(phase_offset(0.0).unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_phase_constant_that_cannot_be_a_path_delay_is_refused() {
+        // A negative one says a reading arrived before the device stamped it,
+        // and `Duration::from_secs_f64` panics on one — so this has to be
+        // caught here or the program dies on a typed minus sign.
+        assert!(phase_offset(-1.0).is_err());
+        assert!(phase_offset(f64::NAN).is_err());
+        assert!(phase_offset(f64::INFINITY).is_err());
+
+        // And the unit slip: 1.045 typed as seconds rather than milliseconds is
+        // three orders of magnitude past anything ever measured here, and would
+        // put the display a second ahead of the box while looking deliberate.
+        let refused = phase_offset(1045.0).unwrap_err().to_string();
+        assert!(refused.contains("is that seconds?"), "{refused}");
+        // The boundary is a rail, not a measurement — but it has to sit well
+        // above every real constant, and 2 ms is the size of the real ones.
+        assert!(phase_offset(2.09).is_ok());
     }
 
     #[test]

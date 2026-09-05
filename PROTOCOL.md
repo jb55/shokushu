@@ -737,6 +737,43 @@ over the capture, scattering 0.12 ms rms about a straight line. That is the same
 quantity `shokushu-ble --drift` measures from one-way anchors, arrived at from
 round trips, and the two agree to within the spread either reports.
 
+### One connection brackets the offset; the advertisements are the slow part
+
+The capture above took 15 connections over 314 s, and did not need to for the
+bracket. **One 6.6 s connection yields about 81 round trips, and a bracket is a
+minimum over them** — a minimum over fewer samples sits *higher*, so a short
+capture reports a bracket that is too wide rather than too narrow. [inferred]
+That is the safe direction. What the extra connections buy is the two
+diagnostics: the connected-against-free-running comparison needs about 4.5
+connected advertisements per connection and so a dozen connections to reach a
+useful matched count, and a drift rate fitted from block midpoints needs three
+separated blocks of round trips. Both are worth having and neither changes the
+offset, which is why `shokushu-ble --jam` opens one connection and
+`shokushu-gatt --phase --reconnect` still exists for the rest.
+
+**But `θ` measured in a 6.6 s window does not stay valid for long against
+advertisements pooled afterwards.** [inferred] `a` carries `θ` as it was during
+the connection and `b` carries `−θ` whenever the advertisement landed, so a
+later advertisement has a smaller `b` and wins the floor for a reason that is
+drift rather than delivery. With one connection there is a single block and so
+no slope to de-trend with. The quantity being eaten into is not the 3.4 ms
+round-trip bracket but the **2.05 ms** the two relevant floors leave — 1.7 ms
+outbound on a read, 0.35 ms on an advertisement — since that sum is what the
+advertisement's staleness bracket spans:
+
+| Advertisements pooled for | Drift at 8.6 ppm | Effect on the offset |
+|---|---|---|
+| 30 s | 0.26 ms | quoted 0.13 ms low |
+| 60 s | 0.52 ms | quoted 0.26 ms low, on a true ~1.02 ms |
+| 240 s | 2.06 ms | exceeds the 2.05 ms; the bounds cross |
+
+**Past about four minutes the pooled bounds on `θ` cross and the capture is
+refused** rather than reducing to a plausible number near zero — the arithmetic
+catching its own limit, the same way the negative-bracket check does.
+[inferred] `shokushu-ble --jam` pools for 60 s for that reason. All of this is
+arithmetic over the measured floors and the measured drift rather than a fresh
+measurement, which is why it is marked inferred.
+
 ### Reads and notifications cannot be told apart on macOS
 
 **A read taken while subscribed is not a round trip.** [measured] CoreBluetooth
@@ -831,6 +868,45 @@ one to repeat: the tool that supplies the reference is the same tool that
 perturbs the signal, and nothing in the capture looks wrong when it happens.
 The check that caught it — comparing the two populations at matched sample
 counts — costs nothing and should be run on any figure of this kind.
+
+### Three boxes agree to a third of a millisecond, passively
+
+Two boxes' offset against each other can be measured without connecting to
+either, which nothing above can do for a box on its own. For each reading,
+`host arrival − device stamp` is that box's delivery delay minus its own clock
+offset; the delivery *floors* are the same quantity for two identical radios at
+the same distance from one host, so differencing two boxes' floors cancels the
+delay and the free-running host clock together and leaves how far apart the two
+boxes are. `analysis/box_agreement.py` does it, at matched sample counts for the
+usual reason.
+
+Ricki, Liliana and Sun at 24 fps, over one 90 s passive capture — 811 readings,
+matched at n=263 per box, with no connection opened to any of them before or
+during: [measured]
+
+| Box | Against the earliest | Of a frame at 24 fps |
+|---|---|---|
+| Sun | 0 (reference) | 0.000 |
+| Ricki | +0.144 ms | +0.003 |
+| Liliana | +0.327 ms | +0.008 |
+
+All three floors had stopped moving by the end — the last convergence step
+shifted each by under 0.1 ms, against the 0.33 ms being reported — so the spread
+is the boxes and not the sample size. **Three boxes jam synced from the same
+master agree to about a third of a millisecond, a hundredth of a frame at
+24 fps.**
+
+The equal-floors assumption is the one thing carrying this, and it is the reason
+for a minimum rather than a mean: a mean would carry each box's whole delay
+distribution, which differs with signal strength and how often it is heard from,
+while a floor is the best case of a path and the best case of two like radios
+should agree. The three RSSIs here spanned −29 to −39 dBm and the answer did not
+order itself by signal strength, which is weak evidence for the assumption and
+not a test of it.
+
+This is the baseline the desync question under **Open questions** wants. It says
+nothing yet about whether connecting moves a box — that needs the same
+measurement again with a connection in between.
 
 ### The connection interval is not negotiable from macOS
 
@@ -1079,7 +1155,12 @@ Each needs a device the observed one couldn't provide.
   apart separate by 0.74 s a day, about 18 frames at 24 fps. The clean test is
   differential and cheap: measure two boxes' offset against each other
   passively, where the host clock cancels, connect once to one of them, and see
-  whether that offset moved.
+  whether that offset moved. **Half of that test is now done.** The passive
+  measurement exists — `analysis/box_agreement.py`, and **Three boxes agree to a
+  third of a millisecond** above has the baseline: Ricki, Liliana and Sun within
+  0.33 ms of each other with nothing having connected to any of them. What is
+  outstanding is the second half, a repeat of that capture with one connection
+  in between, which `shokushu-ble --jam --name <box>` is exactly.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.

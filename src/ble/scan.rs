@@ -255,6 +255,36 @@ impl Device {
         self.clock.last_received()
     }
 
+    /// Applies a calibrated path constant to this device's clock.
+    ///
+    /// [`FreeRun::jam`] has what the constant is, why it does not decay, and
+    /// why it is usually not worth applying; [`crate::ble::jam`]
+    /// measures one. This is the whole of the wiring — the clock does the rest.
+    ///
+    /// # Why this is per device and not per scan
+    ///
+    /// It would be less typing to set one constant on the
+    /// [`Builder`] and have every clock take it, and
+    /// that is deliberately not offered. A calibration is taken against **one
+    /// box**. Part of the constant is this host's Bluetooth stack floor, which
+    /// the boxes in a room do share; the rest is the bias in the origin of that
+    /// box's microsecond counter, which they may or may not — `PROTOCOL.md`
+    /// records the bias as a few milliseconds of unknown origin, measured on
+    /// one unit, and unknown origin is not the same as shared.
+    ///
+    /// So applying a one-box measurement to every box in range is an assumption
+    /// and not a deduction. It may well be right, and it is available: call
+    /// this on each device. What is not available is making it by accident.
+    pub fn jam(&mut self, offset: Duration) {
+        self.clock.jam(offset);
+    }
+
+    /// The path constant being applied to this device's clock. Zero unless
+    /// [`jam`](Device::jam) has set one.
+    pub fn offset(&self) -> Duration {
+        self.clock.offset()
+    }
+
     /// How far this box's clock has been measured to run from this host's.
     ///
     /// The scanner's clock has to work this out to extrapolate, so it costs
@@ -405,6 +435,17 @@ impl Scanner {
     /// The same, without the clocks — enough to look a device up by id.
     pub fn device(&self, id: &PeripheralId) -> Option<&Device> {
         self.index.get(id).map(|i| &self.devices[*i])
+    }
+
+    /// One device by id, to sample its clock or to
+    /// [`jam`](Device::jam) it.
+    ///
+    /// `None` for a device this scan has not heard from yet, which includes one
+    /// it heard from before the scan started — a calibration taken on a
+    /// separate scan hands back a `PeripheralId` that only resolves here once
+    /// that box has advertised again.
+    pub fn device_mut(&mut self, id: &PeripheralId) -> Option<&mut Device> {
+        self.index.get(id).copied().map(|i| &mut self.devices[i])
     }
 
     /// What the name filter was set to, if it was.
