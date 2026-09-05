@@ -98,8 +98,7 @@
 //! features gate:
 //!
 //! - `scan` brings in `btleplug` and a tokio runtime for [`ble`]'s `Scanner`.
-//! - `audio` brings in `cpal`, for the `shokushu` binary. There's no library
-//!   audio transport yet.
+//! - `audio` brings in `cpal`, for the `audio` module's input stream.
 //! - `cli` is what the binaries need to be binaries.
 //!
 //! None are on by default, so a plain dependency is the decoders alone. Add
@@ -117,6 +116,14 @@ pub mod jam;
 pub mod ltc;
 pub mod timecode;
 pub mod wav;
+
+/// Opening an audio input, for the binaries that read one.
+///
+/// Gated because it is where `cpal` comes in; decoding what comes off an input
+/// is [`ltc`], which needs nothing.
+#[cfg(feature = "audio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
+pub mod audio;
 
 /// Errors from anything that talks to hardware.
 ///

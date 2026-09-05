@@ -2,7 +2,8 @@
 
 Reads timecode off a Tentacle Sync E, two ways: `shokushu` decodes SMPTE LTC
 from an audio input, and `shokushu-ble` reads it out of the device's Bluetooth
-advertisements without pairing.
+advertisements without pairing. `shokushu-rec` puts the two halves together and
+records audio to a file stamped with the timecode a box is broadcasting.
 
 The Bluetooth protocol is undocumented by the vendor; what's known about it is
 written up in [PROTOCOL.md](PROTOCOL.md).
@@ -195,6 +196,66 @@ clock and name. This tool does not touch it and neither should you without a
 sniffer capture of the app doing it first — a guessed payload is how a box ends
 up needing a factory reset.
 
+## shokushu-rec
+
+Records an audio input to a Broadcast Wave file stamped with the timecode a
+Tentacle is broadcasting. No cable between the box and the computer, and nothing
+typed in afterwards — the file lands on somebody else's timeline in the right
+place.
+
+```
+$ shokushu-rec --name ricki --device umc     # pick a box and an input
+$ shokushu-rec --seconds 300                 # stop after five minutes
+$ shokushu-rec --output take-1.wav           # otherwise named from the timecode
+$ shokushu-rec --list-devices                # what inputs exist, and their ids
+```
+
+```
+$ shokushu-rec --name ricki --device umc
+adapter state: PoweredOn — recording from UMC202HD 192k (48000 Hz, 2 ch)
+locked onto Ricki at 20:29:46:16 24 fps
+first sample at 20:29:46:18 24 fps — writing ricki_2026-09-04_20-29-46-18.wav
+● 00:00:29.9   20:30:16:13   24 fps   Ricki    -67.0 dBFS
+wrote ricki_2026-09-04_20-29-46-18.wav — 29.995 s, 1439744 frames at 48000 Hz, 2 ch, 24-bit
+  first sample at 20:29:46:18 24 fps, 3541765357 samples since midnight, 2026-09-04
+  the input's clock ran -178 ppm against Ricki's over 30 s (±67 ppm)
+```
+
+The stamp goes in `bext`'s `TimeReference`, which is what an NLE actually syncs
+on, and it is a count of **samples** rather than frames — so the sub-frame field
+in the advertisement survives into the file instead of being rounded to the
+40 ms frame it fell in. The frame rate goes in an iXML chunk alongside, `bext`
+having nowhere to put one. `wav::Bwf` writes both and is ungated, so a file
+like this costs no dependencies.
+
+The start time is not the timecode that happened to be on screen when recording
+began. It is the clock extrapolated back to the instant the first sample was
+*captured*, which is not the instant the callback holding it ran: `cpal` reports
+both, and at 512 frames and 48 kHz the difference is over 10 ms — a quarter of a
+frame at 25 fps, all of it in the same direction. That leaves a start time good
+to a millisecond or two.
+
+What it does not buy is clocking. The interface keeps its own time once
+recording starts and nothing here steers it, which is what the last line
+measures: two readings of the box's clock, one at each end of the take, against
+the sample count in between. The ±figure is the anchor error over the baseline,
+so a short take says nothing and a long one says something — the -178 ppm above
+is that USB interface's crystal, and it reproduced within noise across three
+takes and two different boxes. If it matters, the answer is LTC on a track, not
+Bluetooth.
+
+Timecode is needed to *start* and not to continue. Losing the signal mid-take is
+a non-event: the stamp was written when the file was opened, and the recording
+carries on with a note on the line. Ctrl-C is a clean stop — the two size fields
+at the top of the file are all that separate a finished recording from an
+interrupted one, and they get written.
+
+The date is a separate, much rarer advertisement, and it only fills in `bext`'s
+OriginationDate. Waiting for it costs no audio: the input is already running and
+its samples queue up behind the wait, so what stands still is the file, not the
+take. After five seconds the header goes down without one rather than guessing
+from the host's calendar, which a box need not agree with.
+
 ## Using it as a library
 
 The binaries are thin. Everything they do is in the crate, and `ble::Scanner`
@@ -267,7 +328,11 @@ checkout names them:
 ```
 cargo run --features scan,cli --bin shokushu-ble
 cargo run --features audio,cli --bin shokushu
+cargo run --features scan,audio,cli --bin shokushu-rec
 ```
+
+`shokushu-rec` is the only one that needs both transports, which is what it is
+for.
 
 ### Timecode
 
@@ -361,6 +426,14 @@ through it, snaps rather than slews when the timecode is changed on the device,
 and settles on the *least delayed* of a batch of readings rather than the
 average of them — which is the difference between tracking the device and
 tracking the Bluetooth stack's mood, and is worth about 17 ms.
+
+The BWF writer is tested by writing files and reading the chunks back: that the
+sizes it patches in at the end account for every byte of the file, including the
+pad byte an odd number of 24-bit frames needs; that `TimeReference`'s two
+halves are the right way round past 2^32 samples, which is where swapping them
+puts a recording 24 days out; that a drop-frame rate is written as the ratio
+30000/1001 and not a rounded 29.97; and that samples over full scale are clamped
+rather than wrapped.
 
 All of that is in the always-available decoders, so a bare `cargo test` runs it.
 The scanner's own tests sit behind `scan`; `cargo test --all-features` is the

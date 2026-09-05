@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, FromSample, Sample, SampleFormat, SizedSample};
+use cpal::traits::{DeviceTrait, StreamTrait};
 
+use shokushu::audio;
 use shokushu::ltc::{DecodedFrame, LtcDecoder};
 
 /// How long without a frame before we call it a signal loss.
@@ -45,15 +45,11 @@ fn main() -> Result<()> {
     let host = cpal::default_host();
 
     if opt.list_devices {
-        return list_devices(&host);
+        audio::list_devices(&host)?;
+        return Ok(());
     }
 
-    let device = match &opt.device {
-        Some(want) => find_device(&host, want)?,
-        None => host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("no default input device"))?,
-    };
+    let device = audio::open_device(&host, opt.device.as_deref())?;
 
     let config = device
         .default_input_config()
@@ -75,7 +71,7 @@ fn main() -> Result<()> {
 
     eprintln!(
         "listening on {} ({} Hz, {} ch, {}), channel {}",
-        describe(&device),
+        audio::describe(&device),
         sample_rate,
         channels,
         config.sample_format(),
@@ -93,7 +89,7 @@ fn main() -> Result<()> {
     let meter = level.clone();
     let channel = opt.channel;
 
-    let on_samples = move |samples: &[f32]| {
+    let on_samples = move |samples: &[f32], _: &cpal::InputCallbackInfo| {
         mono.clear();
         mono.extend(samples.iter().skip(channel).step_by(channels));
         frames.clear();
@@ -106,48 +102,12 @@ fn main() -> Result<()> {
     };
 
     let err_fn = |err: cpal::Error| eprintln!("stream error: {err}");
-    let stream_config = config.into();
-    let stream = match config.sample_format() {
-        SampleFormat::I8 => build::<i8, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::I16 => build::<i16, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::I32 => build::<i32, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::U8 => build::<u8, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::U16 => build::<u16, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::F32 => build::<f32, _, _>(&device, stream_config, on_samples, err_fn),
-        SampleFormat::F64 => build::<f64, _, _>(&device, stream_config, on_samples, err_fn),
-        other => return Err(anyhow!("unsupported sample format {other}")),
-    }
-    .context("failed to open the input stream")?;
+    let stream = audio::open_input_stream(&device, config, on_samples, err_fn)?;
 
     stream.play().context("failed to start the input stream")?;
 
     report(rx, &level, opt.json, sample_rate);
     Ok(())
-}
-
-fn build<T, D, E>(
-    device: &Device,
-    config: cpal::StreamConfig,
-    mut on_samples: D,
-    err_fn: E,
-) -> Result<cpal::Stream, cpal::Error>
-where
-    T: SizedSample,
-    f32: FromSample<T>,
-    D: FnMut(&[f32]) + Send + 'static,
-    E: FnMut(cpal::Error) + Send + 'static,
-{
-    let mut buf: Vec<f32> = Vec::new();
-    device.build_input_stream::<T, _, _>(
-        config,
-        move |data: &[T], _: &_| {
-            buf.clear();
-            buf.extend(data.iter().map(|&s| f32::from_sample(s)));
-            on_samples(&buf);
-        },
-        err_fn,
-        None,
-    )
 }
 
 /// Prints decoded frames until the stream dies or the user interrupts us.
@@ -250,67 +210,4 @@ fn decibels(level: &AtomicU32) -> f64 {
     } else {
         20.0 * amplitude.log10()
     }
-}
-
-fn list_devices(host: &cpal::Host) -> Result<()> {
-    let default = host
-        .default_input_device()
-        .and_then(|d| d.id().ok())
-        .map(|id| id.to_string());
-
-    println!("input devices:");
-    for device in host.input_devices()? {
-        let id = device.id().map(|id| id.to_string()).unwrap_or_default();
-        let marker = if Some(&id) == default.as_ref() {
-            "*"
-        } else {
-            " "
-        };
-        let config = match device.default_input_config() {
-            Ok(c) => format!("{} Hz, {} ch, {}", c.sample_rate(), c.channels(), c.sample_format()),
-            Err(e) => format!("no input config: {e}"),
-        };
-        println!("{marker} {}\n    id: {id}\n    {config}", describe(&device));
-    }
-    println!("\n* = default. Pass an id or part of a name to --device.");
-    Ok(())
-}
-
-fn find_device(host: &cpal::Host, want: &str) -> Result<Device> {
-    if let Ok(id) = want.parse()
-        && let Some(device) = host.device_by_id(&id)
-    {
-        return Ok(device);
-    }
-
-    let needle = want.to_lowercase();
-    let mut matches: Vec<Device> = host
-        .input_devices()?
-        .filter(|d| {
-            describe(d).to_lowercase().contains(&needle)
-                || d.id().is_ok_and(|id| id.to_string().to_lowercase().contains(&needle))
-        })
-        .collect();
-
-    match matches.len() {
-        0 => Err(anyhow!(
-            "no input device matches {want:?} — try --list-devices"
-        )),
-        1 => Ok(matches.remove(0)),
-        _ => Err(anyhow!(
-            "{want:?} matches several input devices: {}",
-            matches
-                .iter()
-                .map(describe)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
-}
-
-fn describe(device: &Device) -> String {
-    device
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "<unnamed>".to_string())
 }
