@@ -26,6 +26,14 @@
 //! payload there is how a box ends up needing a factory reset. It is listed
 //! and left alone.
 //!
+//! `--phase` is the other reason to open a connection. An advertisement is a
+//! one-way broadcast, so nothing that only listens can say how far the
+//! device's clock sits from this host's — see the `freerun` module docs. An
+//! ATT read is a round trip, which is exactly what that lacks: stamp the host
+//! clock either side of one and the timecode in the response brackets the
+//! offset. `Phase` has the arithmetic and `analysis/gatt_phase.py` reduces the
+//! file it writes.
+//!
 //! Like `shokushu-probe` and unlike `shokushu-ble`, this opens a connection,
 //! which can disturb the device's advertising. It is deliberately a separate
 //! binary for that reason — the scanner stays passive.
@@ -38,6 +46,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io::{LineWriter, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -49,6 +60,7 @@ use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use clap::Parser;
 use futures::stream::StreamExt;
 use shokushu::ble::{self, Advert};
+use shokushu::Timecode;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -87,6 +99,15 @@ struct Opt {
     /// the seven seconds a connection survives.
     #[arg(long)]
     reconnect: bool,
+
+    /// Measure the offset between the device's clock and this host's, and
+    /// write the samples here as JSON lines. See `Phase` for what it does and
+    /// `analysis/gatt_phase.py` for what to do with the file.
+    ///
+    /// Wants `--no-subscribe`: with a subscription up, a read comes back off
+    /// the notification stream instead of from a round trip. See `Phase`.
+    #[arg(long, value_name = "FILE")]
+    phase: Option<PathBuf>,
 }
 
 /// The vendor service, the same 16-bit UUID the timecode is advertised under.
@@ -94,6 +115,26 @@ const VENDOR_SERVICE_16: u16 = ble::SERVICE_UUID_16;
 
 /// Client Characteristic Configuration, the descriptor a subscribe writes.
 const CCCD: u16 = 0x2902;
+
+/// The vendor characteristic carrying the timecode, headerless. The only one
+/// of the four with a clock in it, and so the only one a round trip is worth
+/// taking on — `0dab1280` changes when the box is synced and never otherwise,
+/// and `0dab2496` has never changed at all.
+const TIMECODE_CHAR: Uuid = Uuid::from_u128(0x0dab_144c_2cb9_11e6_b67b_9e71_128c_ae77);
+
+/// How long to wait for a connect before giving up and going round again.
+///
+/// `--seconds` is only tested between sessions, so an unbounded connect is a
+/// deadline the run cannot honour — and this box does stop answering them
+/// after a few dozen reconnects, wedging a capture indefinitely with nothing
+/// in the log to say why. Fifteen seconds matches `rediscover`'s give-up,
+/// which is the other wait in this loop that could otherwise never end.
+const CONNECT_GIVE_UP: Duration = Duration::from_secs(15);
+
+/// The record type an advertised timecode carries in its first header byte.
+/// The vendor characteristic sends the same record with the header taken off,
+/// so putting one back on is the whole of the decode — see `vendor_timecode`.
+const KIND_TIMECODE: u8 = 0x22;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -181,11 +222,23 @@ async fn listen(
     events: &mut (impl futures::Stream<Item = CentralEvent> + Unpin),
 ) -> Result<()> {
     let overall = Instant::now();
-    let mut run = Run::default();
+    let mut run = Run {
+        // Opened before the first connect, so a run that cannot write its
+        // samples fails now rather than after minutes of collecting them.
+        phase: opt.phase.as_deref().map(Phase::new).transpose()?,
+        ..Default::default()
+    };
     let mut peripheral = central.peripheral(id).await?;
     loop {
         eprintln!("connecting to {name} …");
-        if let Err(e) = peripheral.connect().await {
+        let attempt = match tokio::time::timeout(CONNECT_GIVE_UP, peripheral.connect()).await {
+            Ok(result) => result.map_err(|e| e.to_string()),
+            Err(_) => Err(format!(
+                "no answer in {:.0}s",
+                CONNECT_GIVE_UP.as_secs_f64()
+            )),
+        };
+        if let Err(e) = attempt {
             println!(
                 "[{:7.3}s] connect failed: {e}",
                 overall.elapsed().as_secs_f64()
@@ -324,6 +377,24 @@ async fn converse(
         }
     }
 
+    // A read of anything else costs a connection event and measures nothing:
+    // `0dab1280` moves only when the box is synced and `0dab2496` has never
+    // moved at all, so timing a round trip on either spends an anchor point to
+    // learn what the last one already said.
+    let phase_run = run.phase.is_some();
+    if phase_run {
+        readable.retain(|ch| ch.uuid == TIMECODE_CHAR);
+        // Said once, at the top, because the samples it spoils look perfectly
+        // ordinary in the file and only the analysis notices.
+        if first && !opt.no_subscribe {
+            eprintln!(
+                "warning: --phase without --no-subscribe. A subscribed read returns\n\
+                 a notification rather than a Read Response, so the round trips in\n\
+                 this capture will not be round trips. See `Phase`."
+            );
+        }
+    }
+
     let mut notifications = peripheral.notifications().await?;
 
     // Scanning while connected is optional and off by default because it
@@ -337,6 +408,10 @@ async fn converse(
         central.start_scan(ScanFilter::default()).await?;
     }
     let start = Instant::now();
+    let n = run.sessions;
+    if let Some(phase) = &mut run.phase {
+        phase.session(overall, start, n, "connected");
+    }
     let mut lived = Duration::ZERO;
     for ch in &readable {
         if let Some(bytes) = initial.get(&ch.uuid) {
@@ -361,19 +436,35 @@ async fn converse(
         }
     };
     tokio::pin!(deadline);
-    let mut poll = tokio::time::interval(Duration::from_millis(opt.poll_ms.max(1)));
+    // Phase mode schedules every tick after the first from `dither`, so
+    // the period here only decides how soon the first one comes — and with six
+    // seconds of connection to spend it should come at once.
+    let period = match phase_run {
+        true => Duration::from_millis(1),
+        false => Duration::from_millis(opt.poll_ms.max(1)),
+    };
+    let mut poll = tokio::time::interval(period);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     poll.tick().await; // the first tick is immediate, and we just read them
+    let polling = opt.poll_ms > 0 || phase_run;
     let mut dead = false;
     loop {
         tokio::select! {
             _ = &mut deadline => break,
             note = notifications.next() => {
+                // Stamped before anything else touches it: a notification's
+                // arrival time is the only thing about it this host knows, and
+                // a formatting call between the wire and the clock is delay
+                // charged to the device.
+                let at = Instant::now();
                 let Some(note) = note else {
                     println!("[{:7.3}s] notification stream ended", overall.elapsed().as_secs_f64());
                     break;
                 };
                 lived = start.elapsed();
+                if let Some(phase) = &mut run.phase {
+                    phase.one_way("notify", overall, at, vendor_timecode(&note.value));
+                }
                 println!(
                     "[{:7.3}s] NOTIFY {}  {}{}",
                     overall.elapsed().as_secs_f64(),
@@ -383,13 +474,28 @@ async fn converse(
                 );
                 run.digests.entry(note.uuid).or_default().add(&note.value);
             }
-            _ = poll.tick(), if opt.poll_ms > 0 => {
+            _ = poll.tick(), if polling => {
                 for ch in &readable {
-                    match peripheral.read(ch).await {
+                    // The experiment, and all of it: a stamp either side of a
+                    // round trip. Nothing between `t0` and the request but the
+                    // read itself, and nothing between the response and `t1`.
+                    let t0 = Instant::now();
+                    let read = peripheral.read(ch).await;
+                    let t1 = Instant::now();
+                    match read {
                         Ok(bytes) => {
+                            if let Some(phase) = &mut run.phase {
+                                phase.round_trip(overall, t0, t1, &bytes);
+                            }
                             run.polls.entry(ch.uuid).or_default().add(&bytes);
                             lived = start.elapsed();
-                            run.note(ch.uuid, &bytes, overall, "READ  ");
+                            // A phase run reads several times a second and the
+                            // timecode is different every time, so the log
+                            // this would write is one line per sample and the
+                            // file already has them all.
+                            if !phase_run {
+                                run.note(ch.uuid, &bytes, overall, "READ  ");
+                            }
                         }
                         Err(e) => {
                             // The link going away is itself a result, and how
@@ -409,8 +515,15 @@ async fn converse(
                 if dead {
                     break;
                 }
+                if let Some(phase) = &mut run.phase {
+                    let wait = phase.wait();
+                    poll.reset_after(wait);
+                }
             }
             event = events.next(), if opt.scan => {
+                // Same reason as the notification arm: stamp it before
+                // deciding whether it is even interesting.
+                let at = Instant::now();
                 let Some(event) = event else { continue };
                 let Some(from) = event_peripheral(&event) else { continue };
                 let Some(line) = advert_line(&event) else { continue };
@@ -420,6 +533,15 @@ async fn converse(
                 let mine = *from == id;
                 if mine {
                     run.adverts += 1;
+                    // Only the connected box's, because the offset being
+                    // measured is that box's. Another Tentacle on the same
+                    // timeline is a second unknown offset, not a second
+                    // reading of this one.
+                    if let Some(tc) = advert_timecode(&event)
+                        && let Some(phase) = &mut run.phase
+                    {
+                        phase.one_way("advert", overall, at, Some(tc));
+                    }
                 }
                 println!(
                     "[{:7.3}s] {} {line}",
@@ -440,6 +562,9 @@ async fn converse(
                 let _ = timeout(peripheral.unsubscribe(&ch)).await;
             }
         }
+    }
+    if let Some(phase) = &mut run.phase {
+        phase.session(overall, Instant::now(), n, "dropped");
     }
     Ok(lived)
 }
@@ -505,6 +630,8 @@ struct Run {
     last: BTreeMap<Uuid, Vec<u8>>,
     /// Advertisements seen from the target while connected, if scanning.
     adverts: usize,
+    /// Where `--phase` samples go, if it was asked for.
+    phase: Option<Phase>,
 }
 
 impl Run {
@@ -541,6 +668,23 @@ impl Run {
             let _ = write!(out, " — {} advertisement events from the target", self.adverts);
         }
         out.push('\n');
+        if let Some(phase) = &self.phase {
+            let _ = match &phase.failed {
+                // Said plainly, because a truncated capture that looks whole
+                // is the one failure mode that would poison the analysis
+                // rather than stop it.
+                Some(e) => writeln!(
+                    out,
+                    "  phase: {} sample(s) written, then writing failed: {e}",
+                    phase.records,
+                ),
+                None => writeln!(
+                    out,
+                    "  phase: {} sample(s), {} round trip(s)",
+                    phase.records, phase.reads,
+                ),
+            };
+        }
         if let Some(&shortest) = self.lives.iter().min() {
             let longest = self.lives.iter().max().copied().unwrap_or(shortest);
             let total: Duration = self.lives.iter().sum();
@@ -585,6 +729,218 @@ impl Run {
             }
         }
         out
+    }
+}
+
+/// The offset measurement: what a round trip gives you that a broadcast cannot.
+///
+/// Nothing that only listens can say how far the device's clock sits from this
+/// host's. A transmit-path constant, a flight time and a stack delay all look
+/// identical to a receiver, and a one-way packet carries no way to tell them
+/// apart. An ATT read is not one-way — a Read Request goes out and a Read
+/// Response comes back — so stamping the host clock either side of one gives
+/// the four timestamps NTP works from, with the timecode in the response
+/// standing in for the device's own two:
+///
+/// ```text
+///   t0 ──── request ───▶ ┃ device stamps T ┃ ──── response ───▶ t1
+/// ```
+///
+/// Write `a = T - t0` and `b = t1 - T`, and let `θ` be what we want: the
+/// device's clock minus this host's. Then `a = d_out + θ` and `b = d_ret - θ`,
+/// where `d_out` and `d_ret` are the two legs. Neither leg is knowable on its
+/// own — but both are times, so both are at least zero, and that alone is
+/// enough:
+///
+/// ```text
+///   θ ≤ a   for every sample,    θ ≥ -b   for every sample
+/// ```
+///
+/// so `min(a)` bounds the offset above and `-min(b)` bounds it below. **That
+/// costs no assumption about the two legs being equal**, which matters here
+/// because they are conspicuously not: a request handed to the controller
+/// waits for the next connection anchor point and a response, already at the
+/// device, does not. Halving the round trip — the move that turns NTP's
+/// bracket into a single number — would put the answer at the middle of that
+/// bracket and silently take the asymmetry on as bias. The bracket is the
+/// honest form, and its width is the shortest round trip the run managed.
+///
+/// Which is why the reads are dithered; see [`dither`].
+///
+/// # Do not subscribe while doing this
+///
+/// A read taken while subscribed is not a round trip. On macOS a Read Response
+/// and a notification arrive at CoreBluetooth through the same delegate
+/// callback, and nothing downstream can tell them apart, so a `read` in flight
+/// is resolved by whichever lands first — usually a notification, since the
+/// device pushes one every connection event. The value is real and its timing
+/// is not: the round trip appears to have taken no time at all.
+///
+/// It is not subtle once looked for. Over two captures on the same box,
+/// counting round trips shorter than one 30 ms connection interval — which a
+/// real one cannot be:
+///
+/// ```text
+///   --no-subscribe      0 of   443
+///   subscribed      2,833 of 3,388     (83.6%)
+/// ```
+///
+/// and the subscribed capture's shortest "round trip" was 31 µs. So `--phase`
+/// wants `--no-subscribe`, and warns when it doesn't get it. A subscribed
+/// capture is not wasted — its notifications are genuine, and their arrival
+/// times still say what the notification path costs — but its reads cannot
+/// bound anything.
+///
+/// This writes samples and reduces nothing. `analysis/gatt_phase.py` does the
+/// arithmetic above, checks for the artefact just described, and has the
+/// caveats that go with both.
+struct Phase {
+    out: LineWriter<File>,
+    /// Reads issued, which is what walks the dither.
+    reads: u64,
+    /// Lines written, for the closing summary to report.
+    records: u64,
+    /// The first write that failed, if one did. A capture that quietly stopped
+    /// recording halfway is worse than one that says it did.
+    failed: Option<std::io::Error>,
+}
+
+impl Phase {
+    fn new(path: &Path) -> Result<Phase> {
+        Ok(Phase {
+            out: LineWriter::new(File::create(path)?),
+            reads: 0,
+            records: 0,
+            failed: None,
+        })
+    }
+
+    /// How long to wait before the next read. See [`dither`].
+    fn wait(&mut self) -> Duration {
+        self.reads = self.reads.wrapping_add(1);
+        dither(self.reads)
+    }
+
+    /// One round trip: both host stamps and whatever the device said between
+    /// them.
+    fn round_trip(&mut self, overall: &Instant, t0: Instant, t1: Instant, bytes: &[u8]) {
+        let record = format!(
+            r#"{{"kind":"read","t0_micros":{},"t1_micros":{},"payload":"{}",{}}}"#,
+            t0.saturating_duration_since(*overall).as_micros(),
+            t1.saturating_duration_since(*overall).as_micros(),
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            fields(vendor_timecode(bytes)),
+        );
+        self.emit(&record);
+    }
+
+    /// A notification, which has an arrival stamp and no departure one. Not a
+    /// round trip and not treated as one: it is here so the same run can say
+    /// what the notification path's floor is, which is what bridges this
+    /// measurement onto the advertisement path.
+    fn one_way(&mut self, kind: &str, overall: &Instant, at: Instant, tc: Option<Timecode>) {
+        let record = format!(
+            r#"{{"kind":"{kind}","at_micros":{},{}}}"#,
+            at.saturating_duration_since(*overall).as_micros(),
+            fields(tc),
+        );
+        self.emit(&record);
+    }
+
+    /// A connection opening or closing. The offset is a property of the two
+    /// clocks and carries across a reconnect, but the round trips inside one
+    /// session share a connection anchor grid and those in the next do not, so
+    /// the boundaries have to be on the record.
+    fn session(&mut self, overall: &Instant, at: Instant, n: usize, what: &str) {
+        let record = format!(
+            r#"{{"kind":"session","at_micros":{},"session":{n},"event":"{what}"}}"#,
+            at.saturating_duration_since(*overall).as_micros(),
+        );
+        self.emit(&record);
+    }
+
+    fn emit(&mut self, record: &str) {
+        if self.failed.is_some() {
+            return;
+        }
+        match writeln!(self.out, "{record}") {
+            Ok(()) => self.records += 1,
+            Err(e) => self.failed = Some(e),
+        }
+    }
+}
+
+/// How long to wait before the `n`th read, so that `t0` sweeps the connection
+/// anchor grid instead of landing on one phase of it.
+///
+/// A read handed to the controller waits for the next connection anchor before
+/// it goes anywhere, so most of what a round trip measures is where `t0`
+/// happened to fall in the 30 ms between two of them. That is not a nuisance
+/// to be averaged away — the *shortest* round trip is the entire measurement,
+/// and it only happens when `t0` lands just before an anchor. Poll on a fixed
+/// cadence and `t0` can sit at one phase of that grid for a whole session,
+/// putting a floor under the round trip that belongs to the polling and not to
+/// the link.
+///
+/// Stepping by a prime number of microseconds across a span slightly wider
+/// than the interval walks every phase of it, since a step sharing no factor
+/// with the span visits the whole of it before repeating — and the span is
+/// deliberately not the measured 30 ms, so the sweep still covers a whole
+/// interval if the real one is a little different.
+fn dither(n: u64) -> Duration {
+    /// Coprime with `SPAN`, so the sequence visits every microsecond of it
+    /// before it repeats.
+    const STEP: u64 = 7_919;
+    /// A little over the 30 ms connection interval `PROTOCOL.md` measures.
+    const SPAN: u64 = 31_000;
+    Duration::from_micros(n.wrapping_mul(STEP) % SPAN)
+}
+
+/// A timecode's fields as JSON, or the same keys set to null when the payload
+/// didn't decode. One shape either way: a reader that has to cope with absent
+/// keys copes with them wrongly.
+fn fields(tc: Option<Timecode>) -> String {
+    match tc {
+        Some(tc) => format!(
+            r#""fps":{},"hours":{},"minutes":{},"seconds":{},"frames":{},"subframe_micros":{}"#,
+            tc.rate.fps,
+            tc.hours,
+            tc.minutes,
+            tc.seconds,
+            tc.frames,
+            tc.subframe.as_micros(),
+        ),
+        None => r#""fps":null,"hours":null,"minutes":null,"seconds":null,"frames":null,"subframe_micros":null"#.to_string(),
+    }
+}
+
+/// A vendor characteristic payload as a timecode.
+///
+/// `0dab144c` carries the advertisement's `0x22` record with its two header
+/// bytes taken off — `PROTOCOL.md` has the byte-by-byte evidence — so putting a
+/// header back on and handing it to the advertisement parser is the whole of
+/// the decode, and reuses the range checks that keep some other vendor's blob
+/// from being read as a clock. Byte 1 is skipped rather than read, so what
+/// goes there doesn't matter.
+fn vendor_timecode(bytes: &[u8]) -> Option<Timecode> {
+    let mut framed = Vec::with_capacity(ble::HEADER + bytes.len());
+    framed.extend_from_slice(&[KIND_TIMECODE, 0]);
+    framed.extend_from_slice(bytes);
+    match ble::parse(&framed)? {
+        Advert::Timecode(tc) => Some(tc),
+        Advert::Date(_) => None,
+    }
+}
+
+/// The timecode an advertisement event carries, if it carries one.
+fn advert_timecode(event: &CentralEvent) -> Option<Timecode> {
+    let CentralEvent::ServiceDataAdvertisement { service_data, .. } = event else {
+        return None;
+    };
+    let data = service_data.get(&uuid_from_u16(ble::SERVICE_UUID_16))?;
+    match ble::parse(data)? {
+        Advert::Timecode(tc) => Some(tc),
+        Advert::Date(_) => None,
     }
 }
 
@@ -686,6 +1042,77 @@ mod tests {
             digest.add(&[0xff, byte]);
         }
         assert_eq!(digest.volatility(), ".+");
+    }
+
+    #[test]
+    fn a_vendor_payload_decodes_as_the_headerless_record_it_is() {
+        // PROTOCOL.md's worked example off `0dab144c`: the advertisement's
+        // 0x22 record with its two header bytes taken away. Framing it back up
+        // wrongly — one byte instead of two, or the wrong record type — moves
+        // every field and this is what notices.
+        let tc = vendor_timecode(&[0x19, 0x0c, 0x24, 0x33, 0x05, 0x67, 0x51])
+            .expect("seven bytes of headerless timecode");
+        assert_eq!(tc.rate.fps, 25);
+        assert_eq!((tc.hours, tc.minutes, tc.seconds, tc.frames), (12, 36, 51, 5));
+        assert_eq!(tc.subframe.as_micros(), 0x6751);
+    }
+
+    #[test]
+    fn the_other_vendor_characteristics_are_not_read_as_a_clock() {
+        // A phase capture reads one characteristic, but the decoder is handed
+        // whatever notifies, and the two other vendor characteristics do have
+        // bytes in them. Read as a clock they would put nonsense on the
+        // timeline the offset is measured from, which is worse than a gap.
+        // `0dab2496`, twenty-four zero bytes:
+        assert!(vendor_timecode(&[0u8; 24]).is_none());
+        // `0dab1280`, Ricki's state record from the sync in PROTOCOL.md:
+        let state = [
+            0x0d, 0x6c, 0x00, 0x0c, 0x01, 0x00, 0x53, 0x19, 0x00, 0x00, 0x04, 0x09, 0x1a, 0x0b,
+            0x1c, 0x28,
+        ];
+        assert!(vendor_timecode(&state).is_none());
+    }
+
+    #[test]
+    fn a_payload_that_did_not_decode_still_writes_every_key() {
+        // What `fields` claims: one shape whether or not there was a timecode
+        // in it. A reader that has to cope with a key being absent copes with
+        // it wrongly, and the analysis would silently skip the samples that
+        // most need explaining.
+        let keys = |json: String| -> Vec<String> {
+            json.split(',')
+                .map(|pair| pair.split(':').next().unwrap_or_default().to_string())
+                .collect()
+        };
+        let decoded = vendor_timecode(&[0x19, 0x0c, 0x24, 0x33, 0x05, 0x67, 0x51]);
+        assert!(decoded.is_some());
+        assert_eq!(keys(fields(decoded)), keys(fields(None)));
+    }
+
+    #[test]
+    fn the_dither_sweeps_the_connection_interval_rather_than_landing_on_it() {
+        // The claim in `dither`, and the one the whole measurement rests on:
+        // over a session's worth of reads the waits have to land all over the
+        // 30 ms anchor grid. A step sharing a factor with the span would
+        // revisit a handful of phases forever, and the shortest round trip —
+        // which is the answer — would never be sampled at all.
+        const INTERVAL: u64 = 30_000;
+        // About what one 6.6 s connection gets through.
+        let mut phases: Vec<u64> = (1..=200)
+            .map(|n| dither(n).as_micros() as u64 % INTERVAL)
+            .collect();
+        phases.sort_unstable();
+        let widest = phases
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .expect("two hundred waits");
+        // 193 µs as it stands, against the 1,000 µs a step of 1,000 µs would
+        // leave and the 6,200 µs a step of 6,200 would.
+        assert!(
+            widest < INTERVAL / 50,
+            "widest unsampled phase gap {widest} µs"
+        );
     }
 
     #[test]

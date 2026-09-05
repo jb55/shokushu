@@ -1299,6 +1299,27 @@ model number         six bytes that aren't text, then a NUL</pre>
         is a reasonable guess and nothing more; it is the sort of thing the write
         characteristic might be for.
       </p>
+      <div class="evidence">
+        <div class="claim">And a box stops accepting connections after about thirty of them <span class="badge b-measured">Measured</span></div>
+        <p>
+          Seen on both units in one afternoon of reconnect-driven capture: after
+          roughly 30 sessions in five minutes, <code>connect</code> stopped being
+          answered at all and every attempt timed out, indefinitely. It is
+          connections specifically — the box goes on advertising normally
+          throughout and a passive scanner sees no change. One box did it first
+          and the other did the same a few minutes later under the same load, so
+          it is not a single unit.
+        </p>
+        <p>
+          What clears it was not established. Note that a client with no timeout
+          on <code>connect</code> hangs forever here rather than reporting
+          anything, since a run's deadline is usually only tested between
+          sessions; <code>shokushu-gatt</code> bounds the wait at 15 s for that
+          reason. This is a plausible explanation for a Tentacle "going off the
+          air" after heavy tooling and is worth ruling out before suspecting
+          hardware.
+        </p>
+      </div>
 
       <h3><code>0dab144c</code> — the timecode, headerless</h3>
       <div class="panel">
@@ -1501,6 +1522,199 @@ model number         six bytes that aren't text, then a NUL</pre>
           n grows, which is visibly what happens above — n=220 gives 3,749 and
           n=3,688 gives 3,656. What is consistent across all six is the
           magnitude, not the number.
+        </p>
+      </div>
+
+      <h3>A round trip bounds the offset; a broadcast cannot</h3>
+      <p>
+        Everything above measures the device's clock against host arrival times,
+        which cannot separate a transmit-path constant from a flight time from a
+        stack delay — they are one quantity to anything that only listens. An ATT
+        read is a round trip, and that is what an advertisement structurally
+        cannot be. Stamping the host clock either side of a read on
+        <code>0dab144c</code> gives NTP's four timestamps, with the timecode in
+        the response standing in for the device's own two.
+      </p>
+      <p>
+        Write <code>a = T − t0</code> and <code>b = t1 − T</code> for a read that
+        went out at <code>t0</code>, came back at <code>t1</code> and carried
+        device time <code>T</code>; write <code>θ</code> for the device's clock
+        minus this host's. Then <code>a = d_out + θ</code> and
+        <code>b = d_ret − θ</code> for the two one-way delays. Neither is knowable
+        alone, but both are elapsed times and so both are at least zero, which
+        gives <code>θ ≤ a</code> and <code>θ ≥ −b</code> <em>for every single
+        sample</em>. The tightest pair over a run brackets the offset.
+      </p>
+      <p>
+        That deliberately does not halve the round trip. The two legs are not
+        equal — a request waits for the next connection anchor and a response does
+        not — so halving would put the answer at the middle of the bracket and
+        take the asymmetry on as bias, of the same order as the effect being
+        measured.
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Two boxes, 24 fps, separate runs</th><th class="num">Sun</th><th class="num">Ricki</th></tr></thead>
+          <tbody>
+            <tr><td>Round trips</td><td class="num">2,661 / 259 s</td><td class="num">1,206 / 146 s</td></tr>
+            <tr><td>Shortest round trip</td><td class="num m">30.03 ms</td><td class="num m">29.62 ms</td></tr>
+            <tr><td>Under one 30 ms interval</td><td class="num m">0 of 2,661</td><td class="num m">2 of 1,473</td></tr>
+            <tr><td><b>Bracket on θ, per 30 s block</b></td><td class="num m"><b>3.12–3.64 ms</b></td><td class="num m"><b>3.17–3.82 ms</b></td></tr>
+            <tr><td>Bracket pooled, drift removed</td><td class="num m">3.11 ms</td><td class="num m">3.20 ms</td></tr>
+            <tr><td>Drift from the block midpoints</td><td class="num m">+7.7 ppm</td><td class="num m">+8.8 ppm</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="evidence">
+        <div class="claim">A 30 ms round trip still bounds the offset to about 3.4 ms <span class="badge b-measured">Measured</span></div>
+        <p>
+          <b>The shortest round trip is one connection interval and not less</b>
+          — 30.03 ms against the 30 ms the notification gaps establish. A read
+          handed to the controller waits for the next anchor point, so the reads
+          are dithered by a prime number of microseconds to sweep <code>t0</code>
+          across that grid; polled on a fixed cadence, <code>t0</code> can sit at
+          one phase of it for a whole session and the floor never gets sampled.
+        </p>
+        <p>
+          <b>The bracket is much narrower than the shortest round trip</b>,
+          because the two minima are achieved by different samples:
+          <code>min(a) + min(b) ≤ min(a + b)</code>, with equality only if one
+          sample is best on both legs, and none is. Two units measured minutes
+          apart agree on the width to within a tenth of a millisecond, which is
+          most of the reason to believe it.
+        </p>
+        <p>
+          <b>A negative bracket is the arithmetic catching a bad sample</b>, and
+          it happened once. <code>min(a) + min(b)</code> is a sum of two elapsed
+          times and cannot be below zero, so a block that comes out negative
+          holds at least one sample whose device stamp predates the request that
+          returned it. Ricki's last block did, at the moment the box stopped
+          answering connections: one read with an 88 ms round trip and a stamp
+          27 ms out of place. Every figure here is a minimum, so one impossible
+          sample would otherwise have silently become the answer — and the sign
+          test finds it without needing to know what the answer should be.
+        </p>
+        <p>
+          Drift has to come out before any of this is pooled, and not for the
+          usual reason. <code>a</code> rises with a positive drift while
+          <code>b</code> falls, so <code>min(a)</code> is taken from early in a
+          capture and <code>min(b)</code> from late — the two bounds then
+          constrain <em>different</em> values of <code>θ</code> and the interval
+          between them is spuriously narrow rather than spuriously wide. Pooled
+          raw over this capture the bracket reads 1.75 ms, which is not a bound on
+          anything.
+        </p>
+        <p>
+          The drift falls out as a by-product: the block midpoints move at
+          <b>+7.7 ppm</b> over the capture, scattering 0.12 ms rms about a
+          straight line — the same quantity <code>shokushu-ble --drift</code>
+          measures from one-way anchors, arrived at from round trips.
+        </p>
+      </div>
+
+      <h3>Reads and notifications cannot be told apart on macOS</h3>
+      <div class="evidence">
+        <div class="claim">A read taken while subscribed is not a round trip <span class="badge b-measured">Measured</span></div>
+        <p>
+          CoreBluetooth delivers a Read Response and a notification through the
+          same delegate callback, so a pending read is resolved by whichever
+          arrives first — and the device pushes a notification every connection
+          event. The value is genuine and its timing is fiction.
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:420px">
+            <thead><tr><th>Capture</th><th class="num">Under 30 ms</th><th class="num">Shortest</th></tr></thead>
+            <tbody>
+              <tr><td><code>--no-subscribe</code>, n=443</td><td class="num m">0 (0.0%)</td><td class="num m">30.26 ms</td></tr>
+              <tr><td><code>--no-subscribe</code>, n=2,661</td><td class="num m">0 (0.0%)</td><td class="num m">30.03 ms</td></tr>
+              <tr><td><code>--no-subscribe</code>, n=1,473</td><td class="num m">2 (0.1%)</td><td class="num m">29.62 ms</td></tr>
+              <tr><td>subscribed, n=3,388</td><td class="num m">2,833 (83.6%)</td><td class="num m">0.031 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Thirty-one microseconds is not a Bluetooth round trip. The bracket
+          computed from a subscribed capture comes out <b>negative</b>, which is
+          the arithmetic saying so: a negative width means the device's stamp did
+          not fall between the two host stamps, and here it did not because the
+          stamp arrived before the read that "returned" it was issued.
+        </p>
+        <p>
+          This is a property of the host stack and not of the device, and it is
+          worth knowing for anything that reads and subscribes to the same
+          characteristic: <b>the value is right and the latency is not.</b>
+        </p>
+      </div>
+
+      <h3>What an advertisement costs against a connection</h3>
+      <p>
+        The offset that matters to a clock built on advertisements is the
+        advertisement path's, and a GATT round trip measures the connection path.
+        They are different journeys. But every stream gives
+        <code>b = arrival − device stamp = d − θ</code> for its own delivery
+        delay, and <code>θ</code> is common to all of them, so differencing two
+        floors cancels it and leaves delivery alone.
+      </p>
+      <p>
+        With <code>θ</code> bracketed by the round trips, the staleness of a
+        stream's <em>least delayed</em> reading — how far behind the device's real
+        clock it was when it landed, which is the error left in a clock that
+        anchors on the best reading it sees — is bounded by
+        <code>min(b) − min(b_read)</code> below and <code>min(b) + min(a_read)</code>
+        above.
+      </p>
+      <div class="scroll-x">
+        <table style="min-width:520px">
+          <thead><tr><th>Box</th><th>Stream</th><th class="num">n</th><th class="num">Staleness of the least delayed</th><th class="num">Of a frame at 24 fps</th></tr></thead>
+          <tbody>
+            <tr><td>Sun</td><td>GATT read response</td><td class="num">2,661</td><td class="num m">0 to 3.11 ms</td><td class="num m">0.00–0.07</td></tr>
+            <tr><td>Sun</td><td><b>Advertisement</b></td><td class="num">157</td><td class="num m"><b>5.9 to 9.0 ms</b></td><td class="num m"><b>0.14–0.22</b></td></tr>
+            <tr><td>Ricki</td><td>GATT read response</td><td class="num">1,206</td><td class="num m">0 to 3.20 ms</td><td class="num m">0.00–0.08</td></tr>
+            <tr><td>Ricki</td><td><b>Advertisement</b></td><td class="num">135</td><td class="num m"><b>6.5 to 9.7 ms</b></td><td class="num m"><b>0.16–0.23</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="evidence">
+        <div class="claim">A clock anchored on the least delayed advertisement sits 6 to 10 ms behind the device's <span class="badge b-measured">Measured</span></div>
+        <p>
+          A fifth of a frame at 24 fps. That is the figure the <code>freerun</code>
+          module docs called unmeasured. It is a bound and not a value, and the
+          ~3.6 ms origin bias in the microsecond counter is inside it rather than
+          beside it — this measures the whole quantity a caller cares about and
+          does not take it apart.
+        </p>
+        <p>
+          The two boxes bracket overlapping intervals from separate runs, which
+          is the main reason to believe either. They need not be identical: each
+          box has its own offset, and it is the method being replicated rather
+          than the number.
+        </p>
+        <p>
+          The caveat that remains is the advertisement count. <b>On Sun the floor
+          had not converged</b> — over 157 samples it was still falling at the
+          last step, 8.46 ms to 5.94 ms, so its true staleness is <em>lower</em>
+          than 5.9 ms, the opposite of the direction the bracket errs in. <b>On
+          Ricki it had</b>: 6.48 ms from n=88 and unmoved through n=135. Samples
+          are slow to come by because <b>a box advertises far less while
+          connected</b> — 0.6/s against the 1.4–1.8 fresh readings a second an
+          unconnected box gives, which is the same suppression the flags byte
+          records.
+        </p>
+      </div>
+
+      <h3>The connection interval is not negotiable from macOS</h3>
+      <div class="evidence">
+        <div class="claim">Nothing here can ask for a shorter one <span class="badge b-measured">Measured</span></div>
+        <p>
+          <code>btleplug</code> 0.13 declares
+          <code>Peripheral::connection_parameters</code> and
+          <code>request_connection_parameters</code>, and both default to
+          <code>NotSupported</code>; only the WinRT backend implements them. The
+          CoreBluetooth and BlueZ backends implement neither, which matches
+          CoreBluetooth not exposing connection parameters to a central at all.
+          So the 30 ms interval is a given on this host, and with it the 30 ms
+          floor under a round trip. A 7.5 ms interval would cut the quantisation
+          fourfold and there is no route to one from here.
         </p>
       </div>
 

@@ -114,14 +114,30 @@
 //! device's, and nothing here pretends otherwise: [`Drift`] is a rate, and
 //! there is deliberately no method in this module that reports an offset.
 //!
-//! How big that offset is, is itself unmeasured. The sub-frame bias is about
-//! 3.6 ms; the delivery delay is bounded below by nothing this can see, since
-//! only its spread is observable and not its floor. Both are small against a
-//! 41.7 ms frame at 24 fps, which is why a display built on this looks right —
-//! but "small" is not "known", and a frame-accurate claim wants a number rather
-//! than an argument. The device's `0xfdac` GATT service is where one would have
-//! to come from, being a connection and so timeable in both directions;
-//! `PROTOCOL.md` records what is known about it.
+//! **How big that offset is has been measured, as a bound.** The device's
+//! `0xfdac` GATT service is the connection that argument asks for: a read of it
+//! is timeable in both directions where an advertisement is not. Stamp the host
+//! clock either side of one, and each sample gives `θ ≤ a` and `θ ≥ -b` for the
+//! two halves of the round trip — true whatever the two legs cost, since both
+//! are elapsed times and so neither is negative. The tightest pair over a run
+//! brackets the offset without ever assuming the legs are equal, which they are
+//! not. Watching the advertisements at the same time then carries that onto the
+//! path this module actually uses, the offset cancelling out of the difference
+//! between the two streams' delivery floors.
+//!
+//! The answer, on two boxes at 24 fps: **a clock anchored on the least delayed
+//! advertisement sits about 6 to 10 ms behind the device's own**, a fifth of a
+//! frame. `PROTOCOL.md` has the method and the evidence, `analysis/gatt_phase.py`
+//! does the arithmetic, and `shokushu-gatt --phase` takes the samples.
+//!
+//! Read that as a bound and not as a value, in those words. On one of the two
+//! boxes the advertisement floor was still falling when the capture ended, so
+//! the low end is an over-estimate there. The sub-frame bias of about 3.6 ms is
+//! *inside* the figure rather than beside it — a round trip bounds the total a
+//! reading is behind by and cannot take that total apart, which is what a
+//! separately calibratable transport like LTC would be for. And none of it
+//! changes what this module does: the offset is still a constant nothing here
+//! removes, only one whose size is now known rather than argued.
 //!
 //! # How long it holds
 //!
@@ -130,8 +146,8 @@
 //! back towards the device, so what is left is anchor noise rather than a walk:
 //! over 1800 s on 2026-09-04, two Sync E boxes at 24 fps on macOS, the clock
 //! stayed within 1.0 ms of a straight line through the readings, against
-//! 20.8 ms for half a frame. The unknown constant offset above is not in that
-//! figure and cannot be.
+//! 20.8 ms for half a frame. The constant offset above is not in that figure
+//! and cannot be — it is a separate measurement, and the section above has it.
 //!
 //! **With the box gone, this stops after [`HOLDOVER`]** — five seconds — and
 //! says so. That is a policy about knowing whether the device is still there

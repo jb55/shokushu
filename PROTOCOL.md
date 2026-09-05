@@ -513,6 +513,21 @@ gets 17 to 21 connections a minute. Whether the app avoids this by writing a
 keepalive is a reasonable guess and nothing more; it is the sort of thing the
 write characteristic might be for.
 
+**And a box stops accepting connections after about thirty of them.**
+[measured] Seen on both units in one afternoon of reconnect-driven capture:
+after roughly 30 sessions in five minutes, `connect` stopped being answered at
+all and every attempt timed out, indefinitely. It is connections specifically —
+the box goes on advertising normally throughout, and a passive scanner sees no
+change. One box did it first, and the other did the same thing a few minutes
+later under the same load, so it is not a single unit.
+
+What clears it was not established. Note that a client with no timeout on
+`connect` hangs forever here rather than reporting anything, since a run's
+deadline is usually only tested between sessions; `shokushu-gatt` bounds the
+wait at 15 s for that reason. This is a plausible explanation for a Tentacle
+"going off the air" after heavy tooling and is worth ruling out before
+suspecting hardware.
+
 ### `0dab144c` — the timecode, headerless
 
 **Seven bytes: the advertisement's timecode record with the two header bytes
@@ -648,6 +663,161 @@ The caveat matters and cuts against reading much into the exact value: a
 minimum over n samples is a biased estimator of a floor and creeps downwards as
 n grows, which is visibly what happens above — n=220 gives 3,749 and n=3,688
 gives 3,656. What is consistent across all six is the magnitude, not the number.
+
+### A round trip bounds the offset; a broadcast cannot
+
+Everything above measures the device's clock against host arrival times, which
+cannot separate a transmit-path constant from a flight time from a stack delay
+— they are one quantity to anything that only listens. **An ATT read is a round
+trip, and that is what an advertisement structurally cannot be.** [measured]
+Stamping the host clock either side of `peripheral.read()` on `0dab144c` gives
+NTP's four timestamps, with the timecode in the response standing in for the
+device's own two.
+
+Write `a = T - t0` and `b = t1 - T` for a read that went out at `t0`, came back
+at `t1`, and carried device time `T`; write `θ` for the device's clock minus
+this host's. Then `a = d_out + θ` and `b = d_ret - θ` for the two one-way
+delays. Neither delay is knowable on its own, but both are elapsed times and so
+both are at least zero, which gives `θ ≤ a` and `θ ≥ -b` **for every single
+sample**. The tightest pair over a run brackets the offset.
+
+That deliberately does not halve the round trip. The two legs are not equal
+here — a request waits for the next connection anchor and a response does not —
+so halving would put the answer at the middle of the bracket and take the
+asymmetry on as bias, of the same order as the effect being measured.
+
+Collected with `shokushu-gatt --no-subscribe --scan --phase`, reduced by
+`analysis/gatt_phase.py`. Two boxes at 24 fps, on separate runs:
+
+| | Sun | Ricki |
+|---|---|---|
+| Round trips | 2,661 over 259 s, 30 connections | 1,206 over 146 s, 17 connections |
+| Shortest round trip | 30.03 ms | 29.62 ms |
+| Under one 30 ms interval | 0 of 2,661 | 2 of 1,473 |
+| **Bracket on θ, per 30 s block** | **3.12–3.64, median 3.40** | **3.17–3.82, median 3.34** |
+| Bracket pooled, drift removed | 3.11 ms | 3.20 ms |
+| Drift from the block midpoints | +7.7 ppm | +8.8 ppm |
+
+**Two units, measured a few minutes apart, agree to within a tenth of a
+millisecond on the bracket width.** [measured] That is the figure being claimed,
+and it repeating across boxes is most of the reason to believe it.
+
+**The shortest round trip is one connection interval and not less.** [measured]
+30.03 ms against the 30 ms interval the notification gaps establish. A read
+handed to the controller waits for the next anchor point, so the reads are
+dithered by a prime number of microseconds to sweep `t0` across that grid —
+polled on a fixed cadence, `t0` can sit at one phase of it for a whole session
+and the floor never gets sampled.
+
+**The bracket is much narrower than the shortest round trip**, because the two
+minima are achieved by different samples: `min(a) + min(b) ≤ min(a + b)`, with
+equality only if one sample is best on both legs, and none is. So a 30 ms round
+trip still bounds the offset to about 3.4 ms.
+
+**A negative bracket is the arithmetic catching a bad sample**, and it happened
+once. `min(a) + min(b) = min(d_out) + min(d_ret)`, a sum of two elapsed times,
+so it cannot be below zero — a block that comes out negative contains at least
+one sample whose device stamp predates the request that returned it. Ricki's
+last block did, at the moment the box stopped answering connections: one read
+with an 88 ms round trip and a device stamp 27 ms out of place. The other four
+blocks were unaffected and agree with each other to 0.65 ms. This is worth more
+than the sample it rejects: **every figure here is a minimum, so a single
+impossible sample would otherwise silently become the answer**, and the sign
+test finds it without needing to know what the answer should have been.
+
+Drift has to come out before any of this is pooled, and not for the usual
+reason. `a` rises with a positive drift while `b` falls, so `min(a)` is taken
+from early in a capture and `min(b)` from late — the two bounds then constrain
+*different* values of `θ` and the interval between them is spuriously narrow
+rather than spuriously wide. Pooled raw over this capture the bracket reads
+1.75 ms, which is not a bound on anything.
+
+The drift falls out as a by-product: the block midpoints move at **+7.7 ppm**
+over the capture, scattering 0.12 ms rms about a straight line. That is the same
+quantity `shokushu-ble --drift` measures from one-way anchors, arrived at from
+round trips, and the two agree to within the spread either reports.
+
+### Reads and notifications cannot be told apart on macOS
+
+**A read taken while subscribed is not a round trip.** [measured] CoreBluetooth
+delivers a Read Response and a notification through the same delegate callback,
+so a pending read is resolved by whichever arrives first — and the device pushes
+a notification every connection event. The value is genuine and its timing is
+fiction.
+
+Counting round trips shorter than one connection interval, which a real one
+cannot be:
+
+| Capture | Under 30 ms | Shortest |
+|---|---|---|
+| `--no-subscribe`, n=443 | 0 (0.0%) | 30.26 ms |
+| `--no-subscribe`, n=2,661 | 0 (0.0%) | 30.03 ms |
+| `--no-subscribe`, n=1,473 | 2 (0.1%) | 29.62 ms |
+| subscribed, n=3,388 | 2,833 (83.6%) | 0.031 ms |
+
+Thirty-one microseconds is not a Bluetooth round trip. The bracket computed
+from a subscribed capture comes out **negative**, which is the arithmetic
+saying so: a negative width means the device's stamp did not fall between the
+two host stamps, and here it did not because the stamp arrived before the read
+that "returned" it was issued. So `--phase` wants `--no-subscribe`, and warns
+when it doesn't get it. A subscribed capture is not wasted — the notifications
+in it are real — but its reads bound nothing.
+
+This is a property of the host stack and not of the device, and it is worth
+knowing for anything that reads and subscribes to the same characteristic:
+**the value is right and the latency is not.**
+
+### What an advertisement costs against a connection
+
+The offset that matters to a clock built on advertisements is the
+advertisement path's, and a GATT round trip measures the connection path. They
+are different journeys. But every stream gives `b = arrival − device stamp
+= d − θ` for its own delivery delay `d`, and `θ` is common to all of them, so
+differencing two floors cancels it and leaves delivery alone. `shokushu-gatt
+--scan --no-subscribe --phase` puts both on one timeline.
+
+With `θ` bracketed by the round trips, the staleness of a stream's *least
+delayed* reading — how far behind the device's real clock it was when it landed,
+which is the error left in a clock that anchors on the best reading it sees — is
+bounded by `min(b) − min(b_read)` below and `min(b) + min(a_read)` above. The
+same two captures, with the advertisements they caught from the connected box:
+
+| Box | Stream | n | Staleness of the least delayed | Of a frame at 24 fps |
+|---|---|---|---|---|
+| Sun | GATT read response | 2,661 | 0 to 3.11 ms | 0.00–0.07 |
+| Sun | **Advertisement** | **157** | **5.9 to 9.0 ms** | **0.14–0.22** |
+| Ricki | GATT read response | 1,206 | 0 to 3.20 ms | 0.00–0.08 |
+| Ricki | **Advertisement** | **135** | **6.5 to 9.7 ms** | **0.16–0.23** |
+
+**So a clock anchored on the least delayed advertisement sits between about 6
+and 10 ms behind the device's own, or a fifth of a frame at 24 fps.** [measured]
+That is the figure the `freerun` module docs called unmeasured. It is a bound
+and not a value, and the ~3.6 ms origin bias in the microsecond counter is
+inside it rather than beside it — this measures the whole quantity a caller
+cares about and does not take it apart.
+
+The two boxes bracket overlapping intervals from separate runs, which is the
+main reason to believe either. They need not be identical: each box has its own
+offset, and it is the method that is being replicated rather than the number.
+
+The caveat that remains is the advertisement count. **On Sun the floor had not
+converged** — over 157 samples it was still falling at the last step, 8.46 ms to
+5.94 ms, so its true staleness is *lower* than 5.9 ms, the opposite of the
+direction the bracket errs in. **On Ricki it had**: 6.48 ms from n=88 and
+unmoved through n=135. Samples are slow to come by because **a box advertises
+far less while connected** — 0.6/s against the 1.4–1.8 fresh readings a second an
+unconnected box gives, which is the same suppression the flags byte records.
+
+### The connection interval is not negotiable from macOS
+
+**Nothing here can ask for a shorter one.** [measured] `btleplug` 0.13 declares
+`Peripheral::connection_parameters` and `request_connection_parameters`, and
+both default to `NotSupported`; only the WinRT backend implements them. The
+CoreBluetooth and BlueZ backends implement neither, which matches CoreBluetooth
+not exposing connection parameters to a central at all. So the 30 ms interval
+is a given on this host, and with it the 30 ms floor under a round trip. A
+7.5 ms interval would cut the quantisation fourfold and there is no route to
+one from here.
 
 ### `0dab1280` — device state, including the last sync time
 
@@ -857,6 +1027,21 @@ Each needs a device the observed one couldn't provide.
   frame rate changed — so it is an absolute offset in the counter's origin rather
   than a transmit-path constant or a fixed fraction of a frame. What sets it is
   still unknown. A device on a different firmware revision is the next test.
+  Note that the round-trip measurement above does not settle this: it bounds the
+  *total* a reading is behind by, this bias included, and deliberately does not
+  take the total apart.
+- **How much of the advertisement's 6–9 ms is flight and how much is origin.**
+  The round trip bounds the sum and cannot split it, because both halves are
+  fixed and a bracket only ever sees the sum. Splitting them wants a second
+  transport whose latency is independently calibratable, which is what LTC on
+  the audio output is: sample-accurate, and measurable end to end against a
+  known signal. Read LTC and BLE off the same box at once and the audio path
+  becomes the reference. Blocked on an input — see **Getting it into a Mac**.
+- **Tightening the advertisement floor.** The 5.9 ms low end is a minimum over
+  157 samples and was still falling when the capture ended, so the true figure
+  is below it. A connected box advertises at 0.6/s, which is what makes this
+  slow; the honest fix is a much longer capture rather than a cleverer estimator,
+  since a minimum has no unbiased form to reach for.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.
