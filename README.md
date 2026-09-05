@@ -50,48 +50,20 @@ up, and each free-runs its own clock. Two boxes needn't be showing the same
 timecode — or even running at the same frame rate — and each still ticks
 correctly rather than the two of them fighting over one line.
 
-The display free-runs between advertisements. They arrive only one or two times
-a second, so waiting for them meant the timecode jumped a dozen frames at a
-time; instead each one anchors a local clock and the display is redrawn at the
-frame rate, ticking the way a timecode display should. Anchoring is smoothed,
-since snapping to every packet would let the display tick backwards, and it
-never does. If nothing arrives for five seconds it stops rather than inventing
-frames, and says so:
+The display free-runs between timecode advertisements. They arrive only one or
+two times a second, so waiting for them meant the timecode jumped a dozen
+frames at a time; instead each one anchors a local clock and the display is
+redrawn at the frame rate, ticking the way a timecode display should. Anchoring
+is smoothed, since snapping to every packet would let the display tick
+backwards, and it never does. If nothing arrives for five seconds it stops
+rather than inventing frames, and says so:
 
 ```
   10:03:40:16.8     25 fps   Ricki     2026-09-04   -46 dBm   100%   no signal for 6.1s
 ```
 
-Reception is bursty enough that a gap is usually worth waiting out, so the line
-stays, frozen on the last reading that arrived. After thirty seconds of silence
-it goes: by then the box has been switched off rather than merely missed.
-
 The percentage at the end of the line is the battery, and a `+` after it means
-the device is on a charger. Both come from a manufacturer-data field the device
-broadcasts alongside the timecode, so they appear a second or two after the line
-itself — the two are separate advertisements. There is no Battery Service to read
-over GATT; this is the only place a Sync E publishes its charge, and reading it
-costs nothing, since it is in a broadcast that was being listened to anyway. How
-that was established, and how far the scale is actually pinned down, is in
-[PROTOCOL.md](PROTOCOL.md).
-
-When there is nothing to show, it says why rather than showing nothing. An
-empty screen used to mean any of three things — no Tentacle in range, a
-Tentacle in range whose advertisement no longer decodes, or a scan delivering no
-events at all — and looked identical in all three. After three seconds without
-timecode it reports what it is actually taking in, on stderr, as a single line
-that updates in place:
-
-```
-$ shokushu-ble
-adapter state: PoweredOn — scanning until interrupted
-no timecode: 2 devices advertising 0xFDAC, but 22 of 22 payloads did not decode — Liliana last sent 22 7d 19 0b 3b 13 00 93 bf (--raw -a dumps them all; see PROTOCOL.md)
-```
-
-It stays out of the way once timecode is flowing: the line is given up the
-moment there is a reading to draw, `--json` emits no diagnostics at all, and
-redirecting stderr to a file gets one line per thing that actually changed
-rather than fifty a second.
+the device is on a charger.
 
 Worth being clear about: interpolating makes the display *smooth*, not more
 *accurate*. It adds no information the advertisements didn't carry. `--json` is
