@@ -1814,9 +1814,106 @@ model number         six bytes that aren't text, then a NUL</pre>
           it.
         </p>
         <p>
-          This is the baseline the desync question under <b>Open questions</b>
-          wants. It says nothing yet about whether connecting moves a box — that
-          needs the same measurement again with a connection in between.
+          Taken again twenty minutes later, immediately before the connection
+          below, it reproduced: Sun 0, Ricki +0.147 ms, Liliana +0.313 ms,
+          against +0.144 and +0.327. Two independent captures agreeing to
+          0.02 ms is most of the reason to believe either.
+        </p>
+      </div>
+
+      <h3>One connection does not re-jam a box</h3>
+      <div class="evidence">
+        <div class="claim">The box that was connected to moved least <span class="badge b-measured">Measured</span></div>
+        <p>
+          The measurement above, run twice with exactly one GATT connection in
+          between — <code>shokushu-ble --jam --name ricki</code>, which connects
+          once for 7.5 s, takes 90 ATT reads and hangs up. Two 90 s passive
+          captures either side, about four minutes apart. What matters is not a
+          box's own floor moving, since the host clock is free-running too and a
+          change common to every box is this computer's; it is a box moving
+          <em>relative to the others</em>.
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:440px">
+            <thead><tr><th>Box</th><th>Connected to</th><th class="num">Moved, relative to the others</th></tr></thead>
+            <tbody>
+              <tr><td>Liliana</td><td>no</td><td class="num m">+0.000 ms</td></tr>
+              <tr><td><b>Ricki</b></td><td><b>yes</b></td><td class="num m"><b>+0.021 ms</b></td></tr>
+              <tr><td>Sun</td><td>no</td><td class="num m">+0.165 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          0.021 ms is a two-thousandth of a frame at 24 fps and an eighth of what
+          the unconnected Sun moved, which puts the whole spread at the noise
+          floor of a measurement whose per-box convergence steps run to about
+          0.1 ms. Nothing was re-jammed.
+        </p>
+        <p>
+          That kills one of the three candidates under <b>Open questions</b> and
+          leaves two. It is one connection, on one box, once — so what it rules
+          out is "a bare connection re-jams the box", the mechanism the
+          <code>0dab1280</code> evidence already argued against. It says nothing
+          about the other two: a box wedged by dozens of rapid reconnects and
+          then power-cycled, which is the account that fits "twice" best, and
+          ordinary drift over hours.
+        </p>
+        <p>
+          Note what the differencing buys. Two boxes 8.6 ppm apart against this
+          host separate by about 2 ms of ordinary drift over the four minutes
+          between the two captures, and it cancels entirely, because both
+          captures difference the boxes against each other rather than against
+          this computer. That is why the residual is measured in hundredths of a
+          millisecond and not in milliseconds.
+        </p>
+      </div>
+
+      <h3>The single-connection bracket converges only at the very end</h3>
+      <div class="evidence">
+        <div class="claim">Two collection paths agree to within half a millisecond <span class="badge b-measured">Measured</span></div>
+        <p>
+          <code>shokushu-ble --jam</code> on Ricki, one connection, against the
+          15-connection capture in <b>A round trip bounds the offset</b> above:
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:520px">
+            <thead><tr><th></th><th class="num">15 connections, 314 s</th><th class="num">One connection, 7.5 s</th></tr></thead>
+            <tbody>
+              <tr><td>Round trips</td><td class="num">1,212</td><td class="num">90</td></tr>
+              <tr><td>Shortest round trip</td><td class="num m">30.03 ms</td><td class="num m">32.20 ms</td></tr>
+              <tr><td>Under one 30 ms interval</td><td class="num">0</td><td class="num">0 of 90</td></tr>
+              <tr><td>Bracket on θ</td><td class="num m">3.11 ms pooled</td><td class="num m">3.553 ms</td></tr>
+              <tr><td>Advertisement staleness</td><td class="num m">0 to 2.09 ms (n=534)</td><td class="num m">0 to 2.276 ms (n=20)</td></tr>
+              <tr><td>Offset applied</td><td class="num m">1.045 ms</td><td class="num m">1.138 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The one-connection figures are the wider of the two in every row — the
+          direction a minimum over fewer samples has to err in. That is the
+          corroboration the single-connection design needed.
+        </p>
+        <div class="claim">A bracket near one connection interval means the dither's sweep did not finish <span class="badge b-measured">Measured</span></div>
+        <p>
+          The bracket over growing prefixes of those 90 round trips sat at 33 ms
+          until the last dozen samples and then collapsed by a factor of nine:
+        </p>
+        <pre>     n     width
+    11    47.467
+    22    44.645
+    33    35.392
+    44    34.149
+    55    33.467
+    66    33.467
+    77    33.467
+    88     3.688</pre>
+        <p>
+          That is the dither working as designed and only just in time: the
+          bracket is narrow only once <code>t0</code> has swept far enough around
+          the 30 ms anchor grid that the two minima are achieved by different
+          samples, and 90 reads is barely enough to do it. A connection cut short
+          — a box hanging up at 4 s rather than 7 — would report a bracket near
+          33 ms, which is not wrong, merely useless. The check is free.
         </p>
       </div>
 
@@ -2166,7 +2263,7 @@ Liliana   (zeros)              ->   04 09 1a  0c 2f 14      4 Sep 26,           
               </tr>
               <tr>
                 <td><b>Whether connecting to a box knocks it off a shared timeline</b><br><span style="color:var(--ink-soft)">Two boxes have been seen out of sync after sessions of GATT work, and nothing here writes to a box. Three candidates, none tested: a connection re-jamming it, though <code>0dab1280</code> holds the last sync time and stayed byte-identical across many reconnects, which argues against; the recovery rather than the connection, since a box wedged by rapid reconnects and then power-cycled comes back unjammed; or ordinary drift, two boxes 8.6 ppm apart separating by 0.74 s a day.</span></td>
-                <td><b>Half done.</b> The passive measurement exists — <code>analysis/box_agreement.py</code>, and <b>Three boxes agree to a third of a millisecond</b> above has the baseline: Ricki, Liliana and Sun within 0.33 ms with nothing connected. Outstanding is the second half, the same capture with one connection in between, which <code>shokushu-ble --jam --name &lt;box&gt;</code> is exactly.</td>
+                <td><b>Run, for one connection, and negative</b> — see <b>One connection does not re-jam a box</b> above: the connected box moved 0.021 ms against the others, an unconnected one moved 0.165 ms. What remains is whether <em>many</em> connections do it, or whether the recovery does — a box wedged by dozens of rapid reconnects and then power-cycled, the account that fits "twice" best. Next test is the same before/after with thirty connections instead of one, run deliberately rather than as a side effect, since wedging all three boxes is the known cost of getting it wrong.</td>
               </tr>
             </tbody>
           </table>

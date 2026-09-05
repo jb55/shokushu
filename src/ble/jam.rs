@@ -63,6 +63,26 @@
 //! off a timeline it shares with others is an open question in `PROTOCOL.md`.
 //! Twelve connections to buy two diagnostics is a bad trade, so this takes one.
 //!
+//! Measured, one connection against fifteen on the same hardware: a bracket of
+//! 3.553 ms against 3.11 ms, and an advertisement staleness of 0 to 2.276 ms
+//! against 0 to 2.09 ms. Wider on both, which is the direction it has to err in.
+//!
+//! ## One connection is *just* enough, and the report says when it wasn't
+//!
+//! The bracket only becomes narrow once `dither` has swept `t0` far enough
+//! around the connection anchor grid that its two minima come from different
+//! samples. On that run it took nearly the whole connection: the pooled width
+//! over growing prefixes of the 90 round trips sat at 33 ms through the first
+//! 77 of them and then collapsed to 3.7 ms by 88.
+//!
+//! So a connection cut short reports a bracket near one connection interval,
+//! and **that is a sweep that did not finish rather than a slow link**. It costs
+//! nothing to check: a
+//! [`bracket_width`](crate::jam::Calibration::bracket_width) anywhere near
+//! [`CONNECTION_INTERVAL`](crate::jam::CONNECTION_INTERVAL) means run it again
+//! rather than believe it. The figure is not wrong — the offset it yields is
+//! still a true bound — merely too loose to be worth applying.
+//!
 //! # The drift this cannot take out, and what that costs
 //!
 //! Here is the one real wrinkle in the single-connection shape, stated plainly

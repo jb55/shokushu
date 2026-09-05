@@ -904,9 +904,86 @@ should agree. The three RSSIs here spanned −29 to −39 dBm and the answer did
 order itself by signal strength, which is weak evidence for the assumption and
 not a test of it.
 
-This is the baseline the desync question under **Open questions** wants. It says
-nothing yet about whether connecting moves a box — that needs the same
-measurement again with a connection in between.
+Taken again twenty minutes later, immediately before the connection below, it
+reproduced: Sun 0, Ricki +0.147 ms, Liliana +0.313 ms, against +0.144 and
++0.327. [measured] Two independent captures agreeing to 0.02 ms is most of the
+reason to believe either.
+
+### One connection does not re-jam a box
+
+The measurement above, run twice with exactly one GATT connection in between —
+`shokushu-ble --jam --name ricki`, which connects once for 7.5 s, takes 90 ATT
+reads and hangs up. Two 90 s passive captures either side, about four minutes
+apart. What matters is not a box's own floor moving, since the host clock is
+free-running too and a change common to every box is this computer's; it is a
+box moving **relative to the others**. [measured]
+
+| Box | Connected to | Moved, relative to the others |
+|---|---|---|
+| Liliana | no | +0.000 ms |
+| **Ricki** | **yes** | **+0.021 ms** |
+| Sun | no | +0.165 ms |
+
+**The box that was connected to moved least.** 0.021 ms is a two-thousandth of a
+frame at 24 fps and an eighth of what the unconnected Sun moved, which puts the
+whole spread at the noise floor of a measurement whose per-box convergence steps
+run to about 0.1 ms. Nothing was re-jammed.
+
+That kills one of the three candidates under **Open questions** and leaves two.
+It is one connection, on one box, once — so what it rules out is "a bare
+connection re-jams the box", the mechanism the `0dab1280` evidence already
+argued against. It says nothing about the other two: a box wedged by dozens of
+rapid reconnects and then power-cycled, which is the account that fits "twice"
+best, and ordinary drift over hours. Both need a longer experiment than this.
+
+Note what the differencing buys. Two boxes 8.6 ppm apart against this host
+separate by about 2 ms of ordinary drift over the four minutes between the two
+captures, and it cancels entirely, because both captures difference the boxes
+against each other rather than against this computer. That is why the residual
+is measured in hundredths of a millisecond and not in milliseconds.
+
+### The single-connection bracket converges only at the very end
+
+`shokushu-ble --jam` on Ricki, one connection, against the 15-connection capture
+in **A round trip bounds the offset** above: [measured]
+
+| | 15 connections, 314 s | One connection, 7.5 s |
+|---|---|---|
+| Round trips | 1,212 | 90 |
+| Shortest round trip | 30.03 ms | 32.20 ms |
+| Under one 30 ms interval | 0 | 0 of 90 |
+| Bracket on θ | 3.11 ms pooled | 3.553 ms |
+| Advertisement staleness | 0 to 2.09 ms (n=534) | 0 to 2.276 ms (n=20) |
+| Offset applied | 1.045 ms | 1.138 ms |
+
+**Two collection paths sharing no code above the parser agree to within half a
+millisecond**, and the one-connection figures are the wider of the two in every
+row — the direction a minimum over fewer samples has to err in. That is the
+corroboration the single-connection design needed.
+
+It is close to the edge, though, and the convergence table says so. The bracket
+over growing prefixes of those 90 round trips:
+
+```text
+     n     width
+    11    47.467
+    22    44.645
+    33    35.392
+    44    34.149
+    55    33.467
+    66    33.467
+    77    33.467
+    88     3.688
+```
+
+**It sat at 33 ms until the last dozen samples and then collapsed by a factor of
+nine.** That is the dither working as designed and only just in time: the
+bracket is narrow only once `t0` has swept far enough around the 30 ms anchor
+grid that the two minima are achieved by different samples, and 90 reads is
+barely enough to do it. A connection cut short — a box hanging up at 4 s rather
+than 7 — would report a bracket near 33 ms, which is not wrong, merely useless.
+The check is free: **a bracket close to one connection interval means the sweep
+did not finish**, not that the link is slow.
 
 ### The connection interval is not negotiable from macOS
 
@@ -1143,7 +1220,17 @@ Each needs a device the observed one couldn't provide.
   interval floors and macOS gives no way to shorten. The honest fix is not a
   cleverer estimator, since a minimum has no unbiased form to reach for; it is
   either a much longer capture or a transport that is not Bluetooth.
-- **Whether connecting to a box knocks it off a shared timeline.** [unknown]
+- **Whether connecting to a box knocks it off a shared timeline.** [unknown],
+  and now one candidate lighter. **A single bare connection does not do it** —
+  see **One connection does not re-jam a box** above, where the connected box
+  moved 0.021 ms against the others and an unconnected one moved 0.165 ms. What
+  remains is whether *many* connections do, or whether the recovery does: a box
+  wedged by dozens of rapid reconnects and then power-cycled, which is the
+  account that fits "twice" best and the one this experiment did not touch. The
+  next test is the same before/after with thirty connections in the middle
+  instead of one, and it should be run deliberately rather than as a side effect
+  of other work, since wedging all three boxes is the known cost of getting it
+  wrong. The older framing follows.
   Two boxes have been observed out of sync after sessions of GATT work, and
   nothing here writes to a box — `0dab17e4` is left alone and an ATT read is
   what the round trips use. Three candidates, none tested. A connection could be
@@ -1155,12 +1242,9 @@ Each needs a device the observed one couldn't provide.
   apart separate by 0.74 s a day, about 18 frames at 24 fps. The clean test is
   differential and cheap: measure two boxes' offset against each other
   passively, where the host clock cancels, connect once to one of them, and see
-  whether that offset moved. **Half of that test is now done.** The passive
-  measurement exists — `analysis/box_agreement.py`, and **Three boxes agree to a
-  third of a millisecond** above has the baseline: Ricki, Liliana and Sun within
-  0.33 ms of each other with nothing having connected to any of them. What is
-  outstanding is the second half, a repeat of that capture with one connection
-  in between, which `shokushu-ble --jam --name <box>` is exactly.
+  whether that offset moved. **That test has now been run for one connection**
+  — `analysis/box_agreement.py` either side of `shokushu-ble --jam --name ricki`
+  — and came back negative. Running it for thirty is what is outstanding.
 - **The battery scale below 96.** Byte 2 of the manufacturer record is a charge
   level and 100 is its top, but no box has been watched below 96. Run one flat
   and see whether it reaches 0, and whether it gets there linearly.
