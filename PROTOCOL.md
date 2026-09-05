@@ -767,46 +767,70 @@ This is a property of the host stack and not of the device, and it is worth
 knowing for anything that reads and subscribes to the same characteristic:
 **the value is right and the latency is not.**
 
-### What an advertisement costs against a connection
+### What an advertisement costs, and why the first answer was wrong
 
 The offset that matters to a clock built on advertisements is the
 advertisement path's, and a GATT round trip measures the connection path. They
 are different journeys. But every stream gives `b = arrival − device stamp
-= d − θ` for its own delivery delay `d`, and `θ` is common to all of them, so
-differencing two floors cancels it and leaves delivery alone. `shokushu-gatt
---scan --no-subscribe --phase` puts both on one timeline.
+= d − θ` for its own delivery delay, and `θ` is common to all of them, so
+differencing two floors cancels it and leaves delivery alone.
+
+**The trap is that connecting to a box changes the thing being measured.**
+[measured] A box holds a link *and* advertises, and the advertising loses. It
+does not merely slow down from 1.4–1.8 fresh readings a second to 0.6 — each
+advertisement also lands **9.5 ms later relative to the device's own stamp**.
+Measured on one box, matched at 67 samples either side so that a thinner sample
+cannot masquerade as a slower path:
+
+| Advertisements | n | Delivery floor |
+|---|---|---|
+| While a link was up | 67 | +9.53 ms |
+| Between sessions, box free-running | 67 | 0 (reference) |
+
+So the honest measurement needs the box *not* connected, which sounds like it
+rules out the round trip that supplies `θ`. It doesn't: alternate. Connect,
+take round trips, disconnect, let the box advertise normally, reconnect. `θ`
+carries across the gaps on the measured drift — 8.6 ppm here, so 0.09 ms across
+a 10 s rest, negligible against what is being measured. `shokushu-gatt
+--rest-ms` exists for this, and the phase capture records whether a link was up
+when each advertisement landed.
 
 With `θ` bracketed by the round trips, the staleness of a stream's *least
 delayed* reading — how far behind the device's real clock it was when it landed,
 which is the error left in a clock that anchors on the best reading it sees — is
-bounded by `min(b) − min(b_read)` below and `min(b) + min(a_read)` above. The
-same two captures, with the advertisements they caught from the connected box:
+bounded by `min(b) − min(b_best)` below and `min(b) + min(a_read)` above, where
+`min(b_best)` is the floor of whichever stream reached the host soonest. One
+box, 24 fps, 1,212 round trips and 601 advertisements over 314 s in 15
+connections with a 10 s rest between them:
 
-| Box | Stream | n | Staleness of the least delayed | Of a frame at 24 fps |
-|---|---|---|---|---|
-| Sun | GATT read response | 2,661 | 0 to 3.11 ms | 0.00–0.07 |
-| Sun | **Advertisement** | **157** | **5.9 to 9.0 ms** | **0.14–0.22** |
-| Ricki | GATT read response | 1,206 | 0 to 3.20 ms | 0.00–0.08 |
-| Ricki | **Advertisement** | **135** | **6.5 to 9.7 ms** | **0.16–0.23** |
+| Stream | n | Staleness of the least delayed | Of a frame at 24 fps |
+|---|---|---|---|
+| **Advertisement, free-running** | **534** | **0 to 2.09 ms** | **0.00–0.05** |
+| GATT read response | 1,212 | 1.35 to 3.43 ms | 0.03–0.08 |
 
-**So a clock anchored on the least delayed advertisement sits between about 6
-and 10 ms behind the device's own, or a fifth of a frame at 24 fps.** [measured]
-That is the figure the `freerun` module docs called unmeasured. It is a bound
-and not a value, and the ~3.6 ms origin bias in the microsecond counter is
-inside it rather than beside it — this measures the whole quantity a caller
-cares about and does not take it apart.
+**A clock anchored on the least delayed advertisement sits at most about 2 ms
+behind the device's own** — a twentieth of a frame at 24 fps, and not
+distinguishable from no delay at all. [measured] That is the figure the
+`freerun` module docs called unmeasured.
 
-The two boxes bracket overlapping intervals from separate runs, which is the
-main reason to believe either. They need not be identical: each box has its own
-offset, and it is the method that is being replicated rather than the number.
+The zero is by construction rather than by measurement: the advertisement
+stream turns out to give the tightest lower bound on `θ` of any stream here, so
+it reads zero and everything else is measured against it. **The content is the
+upper bound.** The advertisement path is also *faster* than the read-response
+path by 1.35 ms, which is what one would expect — a response waits for the next
+connection anchor and a broadcast does not.
 
-The caveat that remains is the advertisement count. **On Sun the floor had not
-converged** — over 157 samples it was still falling at the last step, 8.46 ms to
-5.94 ms, so its true staleness is *lower* than 5.9 ms, the opposite of the
-direction the bracket errs in. **On Ricki it had**: 6.48 ms from n=88 and
-unmoved through n=135. Samples are slow to come by because **a box advertises
-far less while connected** — 0.6/s against the 1.4–1.8 fresh readings a second an
-unconnected box gives, which is the same suppression the flags byte records.
+The ~3.6 ms origin bias in the microsecond counter is inside these figures
+rather than beside them: a round trip bounds the total a reading is behind by
+and cannot take that total apart.
+
+**An earlier version of this section reported 6 to 9 ms**, from two captures
+whose advertisements were *all* taken while a link was up. The number was a
+measurement of the observer. It is recorded here because the mistake is an easy
+one to repeat: the tool that supplies the reference is the same tool that
+perturbs the signal, and nothing in the capture looks wrong when it happens.
+The check that caught it — comparing the two populations at matched sample
+counts — costs nothing and should be run on any figure of this kind.
 
 ### The connection interval is not negotiable from macOS
 

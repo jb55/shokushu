@@ -100,6 +100,13 @@ struct Opt {
     #[arg(long)]
     reconnect: bool,
 
+    /// Stay disconnected this long between sessions, in milliseconds.
+    ///
+    /// 0 reconnects immediately, which is what a capture of the service itself
+    /// wants. A `--phase` capture wants a few seconds: see `rest`.
+    #[arg(long, default_value_t = 0)]
+    rest_ms: u64,
+
     /// Measure the offset between the device's clock and this host's, and
     /// write the samples here as JSON lines. See `Phase` for what it does and
     /// `analysis/gatt_phase.py` for what to do with the file.
@@ -231,12 +238,34 @@ async fn listen(
     let mut peripheral = central.peripheral(id).await?;
     loop {
         eprintln!("connecting to {name} …");
-        let attempt = match tokio::time::timeout(CONNECT_GIVE_UP, peripheral.connect()).await {
-            Ok(result) => result.map_err(|e| e.to_string()),
-            Err(_) => Err(format!(
-                "no answer in {:.0}s",
-                CONNECT_GIVE_UP.as_secs_f64()
-            )),
+        // Advertisements keep going on the phase timeline while the connect is
+        // in flight, and they are the ones that matter most: the gap between
+        // two sessions is the only time the box advertises at the rate a
+        // passive clock actually sees. The scan is the one `converse` left
+        // running, so there is nothing to start here.
+        let attempt = {
+            let connect = peripheral.connect();
+            tokio::pin!(connect);
+            let give_up = tokio::time::sleep(CONNECT_GIVE_UP);
+            tokio::pin!(give_up);
+            loop {
+                tokio::select! {
+                    result = &mut connect => break result.map_err(|e| e.to_string()),
+                    _ = &mut give_up => {
+                        break Err(format!(
+                            "no answer in {:.0}s",
+                            CONNECT_GIVE_UP.as_secs_f64()
+                        ))
+                    }
+                    event = events.next(), if opt.scan => {
+                        let at = Instant::now();
+                        let Some(event) = event else { continue };
+                        if event_peripheral(&event) == Some(id) {
+                            run.note_advert(&event, at, &overall, false);
+                        }
+                    }
+                }
+            }
         };
         if let Err(e) = attempt {
             println!(
@@ -265,10 +294,51 @@ async fn listen(
         if !opt.reconnect || expired(opt, &overall) {
             break;
         }
+        rest(opt, events, id, &overall, &mut run).await;
     }
     eprintln!("disconnected");
     println!("\n{}", run.summarise(overall.elapsed()));
     Ok(())
+}
+
+/// Stay off the box between sessions, logging what it broadcasts meanwhile.
+///
+/// Two reasons, and they happen to want the same thing.
+///
+/// **It is the only time the box advertises normally.** A connected one
+/// broadcasts at about a third the rate, so a delivery floor measured inside a
+/// session is a floor for a state a passive clock is never in. The gap is
+/// where the comparison has to come from, and back-to-back reconnects leave
+/// barely a second of it.
+///
+/// **And reconnecting flat out stops the box answering.** Around thirty
+/// connections in five minutes and it refuses them altogether while still
+/// advertising — `PROTOCOL.md` has it. Resting is what keeps a long capture
+/// from ending in a wall of timeouts.
+async fn rest(
+    opt: &Opt,
+    events: &mut (impl futures::Stream<Item = CentralEvent> + Unpin),
+    id: &PeripheralId,
+    overall: &Instant,
+    run: &mut Run,
+) {
+    if opt.rest_ms == 0 {
+        return;
+    }
+    let until = tokio::time::sleep(Duration::from_millis(opt.rest_ms));
+    tokio::pin!(until);
+    loop {
+        tokio::select! {
+            _ = &mut until => return,
+            event = events.next(), if opt.scan => {
+                let at = Instant::now();
+                let Some(event) = event else { continue };
+                if event_peripheral(&event) == Some(id) {
+                    run.note_advert(&event, at, overall, false);
+                }
+            }
+        }
+    }
 }
 
 /// Give up on a GATT teardown that isn't going to answer. Every one of these
@@ -537,11 +607,7 @@ async fn converse(
                     // measured is that box's. Another Tentacle on the same
                     // timeline is a second unknown offset, not a second
                     // reading of this one.
-                    if let Some(tc) = advert_timecode(&event)
-                        && let Some(phase) = &mut run.phase
-                    {
-                        phase.one_way("advert", overall, at, Some(tc));
-                    }
+                    run.note_advert(&event, at, overall, true);
                 }
                 println!(
                     "[{:7.3}s] {} {line}",
@@ -635,6 +701,20 @@ struct Run {
 }
 
 impl Run {
+    /// Put an advertisement from the target on the phase timeline.
+    ///
+    /// Called from inside a session and from the gap between two, which is the
+    /// point: see `Phase::advert`.
+    fn note_advert(&mut self, event: &CentralEvent, at: Instant, overall: &Instant, connected: bool) {
+        let Some(phase) = &mut self.phase else {
+            return;
+        };
+        let Some(tc) = advert_timecode(event) else {
+            return;
+        };
+        phase.advert(overall, at, Some(tc), connected);
+    }
+
     /// Log a read, but only when it differs from the last one logged. A
     /// characteristic read every few seconds for a minute would otherwise fill
     /// the log with the news that it hasn't changed, burying the ones that
@@ -841,6 +921,23 @@ impl Phase {
     fn one_way(&mut self, kind: &str, overall: &Instant, at: Instant, tc: Option<Timecode>) {
         let record = format!(
             r#"{{"kind":"{kind}","at_micros":{},{}}}"#,
+            at.saturating_duration_since(*overall).as_micros(),
+            fields(tc),
+        );
+        self.emit(&record);
+    }
+
+    /// An advertisement, and whether a connection was up when it landed.
+    ///
+    /// The flag is the whole reason this is not just `one_way`. A connected box
+    /// advertises at about a third the rate, and a delivery floor calibrated
+    /// only from inside a connection is a floor for a state a passive clock is
+    /// never in. Whether suppression moves the floor — as opposed to merely
+    /// sampling it less often — is the difference between a constant that can
+    /// honestly be applied to `freerun` and one that cannot.
+    fn advert(&mut self, overall: &Instant, at: Instant, tc: Option<Timecode>, connected: bool) {
+        let record = format!(
+            r#"{{"kind":"advert","at_micros":{},"connected":{connected},{}}}"#,
             at.saturating_duration_since(*overall).as_micros(),
             fields(tc),
         );

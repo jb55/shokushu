@@ -174,23 +174,37 @@ def blocks(rows, length):
 
 
 def fit(points):
-    """Least-squares slope and intercept of (x, y) pairs, or None if degenerate.
+    """Theil-Sen slope and intercept of (x, y) pairs, or None if degenerate.
 
-    Used on block midpoints, which are already minima and so already the low
-    edge of their scatter — this is a line through a handful of clean points,
-    not a fit to raw one-sided noise.
+    The median of all pairwise slopes, not least squares. These are block
+    bracket midpoints — few of them, and one bad block moves its midpoint by
+    tens of milliseconds where the honest ones sit within a fraction of one.
+    Least squares hands such a block most of the fit: on a 314 s capture a
+    single bad block turned +8.8 ppm into -23.3 ppm at 3.8 ms rms, and since
+    the slope is then used to de-trend everything pooled, the wrong slope
+    quietly turned the bracket negative rather than failing.
+
+    Theil-Sen ignores it. It tolerates up to 29% of the points being arbitrary,
+    needs no threshold to be chosen, and on clean input agrees with least
+    squares to well inside what any of this resolves.
     """
     n = len(points)
     if n < 2:
         return None
-    mx = sum(x for x, _ in points) / n
-    my = sum(y for _, y in points) / n
-    sxx = sum((x - mx) ** 2 for x, _ in points)
-    if sxx == 0:
+    slopes = [
+        (points[j][1] - points[i][1]) / (points[j][0] - points[i][0])
+        for i in range(n)
+        for j in range(i + 1, n)
+        if points[j][0] != points[i][0]
+    ]
+    if not slopes:
         return None
-    sxy = sum((x - mx) * (y - my) for x, y in points)
-    slope = sxy / sxx
-    return slope, my - slope * mx
+    slopes.sort()
+    slope = slopes[len(slopes) // 2]
+    # The intercept that puts the line through the median residual, which is
+    # the matching robust choice — a mean here would let the outlier back in.
+    offsets = sorted(y - slope * x for x, y in points)
+    return slope, offsets[len(offsets) // 2]
 
 
 def contradictory(reads, length):
@@ -389,8 +403,15 @@ def report_paths(rows, reads):
     for row in rows:
         if "b_flat" in row:
             streams[row["kind"]].append(row)
+    # theta's upper bound can only come from a round trip: `a` needs a
+    # departure stamp and a one-way stream has none. The lower bound can come
+    # from any stream, and should come from whichever gives the tightest one —
+    # if advertisements reach the host sooner after being stamped than read
+    # responses do, they constrain theta better than the round trips do on that
+    # side, and using the reads' floor there would both loosen the bracket and
+    # report a negative staleness, which no delivery delay can be.
     upper_read = min(r["a_flat"] for r in reads)
-    lower_read = min(r["b_flat"] for r in reads)
+    lower_read = min(min(r["b_flat"] for r in rows_of) for rows_of in streams.values())
     fps = next((r["fps"] for r in reads if r.get("fps")), None)
     frame = 1.0 / fps if fps else None
     print("   stream        n    staleness of the least delayed    of a frame")
@@ -404,9 +425,11 @@ def report_paths(rows, reads):
             f"    {frames:>11}"
         )
     print()
-    print("  The `read` row is the round trip judging itself: its low end is zero by")
-    print("  construction and its high end is the bracket width. Any other row is a")
-    print("  real measurement of that path against this one.")
+    print("  Low ends are against whichever stream reached the host soonest after")
+    print("  being stamped, so that stream reads zero by construction and the")
+    print("  others are measured against it. A high end is that stream's floor plus")
+    print("  the round trips' bracket, which is the only thing that bounds theta")
+    print("  from above.")
     print()
     if "advert" not in streams:
         print("  No advertisements here, so the path `freerun` actually uses is not")
@@ -415,6 +438,34 @@ def report_paths(rows, reads):
         print()
         return
     adverts = streams["advert"]
+    # Does suppression move the floor, or only how often it gets sampled?
+    # A box advertises about a third as often while a central holds a link, and
+    # the constant is calibrated during a connection but applied to a clock
+    # that is never in one. Compared at matched sample counts, because a
+    # minimum over fewer samples sits higher for that reason alone and would
+    # otherwise look like a slower path.
+    inside = sorted((r for r in adverts if r.get("connected")), key=lambda r: r["host"])
+    between = sorted((r for r in adverts if r.get("connected") is False), key=lambda r: r["host"])
+    print("  Connected against free-running, at matched n:")
+    print()
+    if not between:
+        print("    no advertisements from between connections in this capture.")
+        print("    Older captures cannot answer this — the tool only logged them")
+        print("    during a session. Re-capture to compare.")
+    else:
+        n = min(len(inside), len(between))
+        floor_in = min(r["b_flat"] for r in inside[:n]) - lower_read
+        floor_out = min(r["b_flat"] for r in between[:n]) - lower_read
+        print(f"    connected  n={n:4d}   floor {floor_in * 1e3:8.3f} ms")
+        print(f"    between    n={n:4d}   floor {floor_out * 1e3:8.3f} ms")
+        print(f"    difference             {(floor_out - floor_in) * 1e3:+8.3f} ms")
+        print()
+        print("    A difference near zero means suppression changes how often the")
+        print("    floor is sampled and not where it is, so a constant calibrated")
+        print("    inside a connection may be applied to a passive clock. A large")
+        print("    one means it may not, and the calibration has to come from the")
+        print("    free-running stream instead.")
+    print()
     print("  Whether the advertisement figure has settled:")
     print()
     ordered = sorted(adverts, key=lambda r: r["host"])

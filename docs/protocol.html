@@ -1646,59 +1646,76 @@ model number         six bytes that aren't text, then a NUL</pre>
         </p>
       </div>
 
-      <h3>What an advertisement costs against a connection</h3>
+      <h3>What an advertisement costs, and why the first answer was wrong</h3>
       <p>
         The offset that matters to a clock built on advertisements is the
         advertisement path's, and a GATT round trip measures the connection path.
-        They are different journeys. But every stream gives
-        <code>b = arrival − device stamp = d − θ</code> for its own delivery
-        delay, and <code>θ</code> is common to all of them, so differencing two
-        floors cancels it and leaves delivery alone.
+        But every stream gives <code>b = arrival − device stamp = d − θ</code> for
+        its own delivery delay, and <code>θ</code> is common to all of them, so
+        differencing two floors cancels it and leaves delivery alone.
       </p>
-      <p>
-        With <code>θ</code> bracketed by the round trips, the staleness of a
-        stream's <em>least delayed</em> reading — how far behind the device's real
-        clock it was when it landed, which is the error left in a clock that
-        anchors on the best reading it sees — is bounded by
-        <code>min(b) − min(b_read)</code> below and <code>min(b) + min(a_read)</code>
-        above.
-      </p>
+      <div class="evidence">
+        <div class="claim">Connecting to a box changes the thing being measured <span class="badge b-measured">Measured</span></div>
+        <p>
+          A box holds a link <em>and</em> advertises, and the advertising loses.
+          It does not merely slow from 1.4–1.8 fresh readings a second to 0.6 —
+          each advertisement also lands <b>9.5 ms later relative to the device's
+          own stamp</b>. Matched at 67 samples either side, so a thinner sample
+          cannot masquerade as a slower path:
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:420px">
+            <thead><tr><th>Advertisements</th><th class="num">n</th><th class="num">Delivery floor</th></tr></thead>
+            <tbody>
+              <tr><td>While a link was up</td><td class="num">67</td><td class="num m">+9.53 ms</td></tr>
+              <tr><td>Between sessions, free-running</td><td class="num">67</td><td class="num m">0 (reference)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          So the honest measurement needs the box <em>not</em> connected, which
+          sounds like it rules out the round trip that supplies <code>θ</code>. It
+          doesn't: alternate. Connect, take round trips, disconnect, let the box
+          advertise normally, reconnect. <code>θ</code> carries across the gaps on
+          the measured drift — 8.6 ppm here, so 0.09 ms across a 10 s rest.
+          <code>shokushu-gatt --rest-ms</code> exists for this, and the capture
+          records whether a link was up when each advertisement landed.
+        </p>
+      </div>
       <div class="scroll-x">
         <table style="min-width:520px">
-          <thead><tr><th>Box</th><th>Stream</th><th class="num">n</th><th class="num">Staleness of the least delayed</th><th class="num">Of a frame at 24 fps</th></tr></thead>
+          <thead><tr><th>Stream</th><th class="num">n</th><th class="num">Staleness of the least delayed</th><th class="num">Of a frame at 24 fps</th></tr></thead>
           <tbody>
-            <tr><td>Sun</td><td>GATT read response</td><td class="num">2,661</td><td class="num m">0 to 3.11 ms</td><td class="num m">0.00–0.07</td></tr>
-            <tr><td>Sun</td><td><b>Advertisement</b></td><td class="num">157</td><td class="num m"><b>5.9 to 9.0 ms</b></td><td class="num m"><b>0.14–0.22</b></td></tr>
-            <tr><td>Ricki</td><td>GATT read response</td><td class="num">1,206</td><td class="num m">0 to 3.20 ms</td><td class="num m">0.00–0.08</td></tr>
-            <tr><td>Ricki</td><td><b>Advertisement</b></td><td class="num">135</td><td class="num m"><b>6.5 to 9.7 ms</b></td><td class="num m"><b>0.16–0.23</b></td></tr>
+            <tr><td><b>Advertisement, free-running</b></td><td class="num">534</td><td class="num m"><b>0 to 2.09 ms</b></td><td class="num m"><b>0.00–0.05</b></td></tr>
+            <tr><td>GATT read response</td><td class="num">1,212</td><td class="num m">1.35 to 3.43 ms</td><td class="num m">0.03–0.08</td></tr>
           </tbody>
         </table>
       </div>
       <div class="evidence">
-        <div class="claim">A clock anchored on the least delayed advertisement sits 6 to 10 ms behind the device's <span class="badge b-measured">Measured</span></div>
+        <div class="claim">A clock anchored on the least delayed advertisement sits at most about 2 ms behind the device's <span class="badge b-measured">Measured</span></div>
         <p>
-          A fifth of a frame at 24 fps. That is the figure the <code>freerun</code>
-          module docs called unmeasured. It is a bound and not a value, and the
-          ~3.6 ms origin bias in the microsecond counter is inside it rather than
-          beside it — this measures the whole quantity a caller cares about and
-          does not take it apart.
+          A twentieth of a frame at 24 fps, and not distinguishable from no delay
+          at all. That is the figure the <code>freerun</code> module docs called
+          unmeasured.
         </p>
         <p>
-          The two boxes bracket overlapping intervals from separate runs, which
-          is the main reason to believe either. They need not be identical: each
-          box has its own offset, and it is the method being replicated rather
-          than the number.
+          The zero is by construction rather than by measurement: the
+          advertisement stream gives the tightest lower bound on <code>θ</code> of
+          any stream here, so it reads zero and everything else is measured
+          against it. <b>The content is the upper bound.</b> The advertisement
+          path is also <em>faster</em> than the read-response path by 1.35 ms,
+          which is what one would expect — a response waits for the next
+          connection anchor and a broadcast does not. The ~3.6 ms origin bias in
+          the counter is inside these figures rather than beside them.
         </p>
         <p>
-          The caveat that remains is the advertisement count. <b>On Sun the floor
-          had not converged</b> — over 157 samples it was still falling at the
-          last step, 8.46 ms to 5.94 ms, so its true staleness is <em>lower</em>
-          than 5.9 ms, the opposite of the direction the bracket errs in. <b>On
-          Ricki it had</b>: 6.48 ms from n=88 and unmoved through n=135. Samples
-          are slow to come by because <b>a box advertises far less while
-          connected</b> — 0.6/s against the 1.4–1.8 fresh readings a second an
-          unconnected box gives, which is the same suppression the flags byte
-          records.
+          <b>An earlier version of this section reported 6 to 9 ms</b>, from two
+          captures whose advertisements were <em>all</em> taken while a link was
+          up. The number was a measurement of the observer. It is recorded because
+          the mistake is an easy one to repeat: the tool that supplies the
+          reference is the same tool that perturbs the signal, and nothing in the
+          capture looks wrong when it happens. The check that caught it —
+          comparing the two populations at matched sample counts — costs nothing.
         </p>
       </div>
 

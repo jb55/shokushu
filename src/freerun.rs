@@ -125,19 +125,27 @@
 //! path this module actually uses, the offset cancelling out of the difference
 //! between the two streams' delivery floors.
 //!
-//! The answer, on two boxes at 24 fps: **a clock anchored on the least delayed
-//! advertisement sits about 6 to 10 ms behind the device's own**, a fifth of a
-//! frame. `PROTOCOL.md` has the method and the evidence, `analysis/gatt_phase.py`
-//! does the arithmetic, and `shokushu-gatt --phase` takes the samples.
+//! The catch is that connecting to a box to measure it delays that box's own
+//! advertisements by about 9.5 ms — it is holding a link and broadcasting at
+//! once, and the broadcasting loses. So the two streams have to be interleaved
+//! rather than watched together: connect for the round trips, disconnect and
+//! let the box advertise normally, and carry the offset across the gap on the
+//! measured drift, which at 8.6 ppm moves it 0.09 ms in ten seconds.
 //!
-//! Read that as a bound and not as a value, in those words. On one of the two
-//! boxes the advertisement floor was still falling when the capture ended, so
-//! the low end is an over-estimate there. The sub-frame bias of about 3.6 ms is
-//! *inside* the figure rather than beside it — a round trip bounds the total a
-//! reading is behind by and cannot take that total apart, which is what a
-//! separately calibratable transport like LTC would be for. And none of it
-//! changes what this module does: the offset is still a constant nothing here
-//! removes, only one whose size is now known rather than argued.
+//! Done that way, on a box at 24 fps: **a clock anchored on the least delayed
+//! advertisement sits at most about 2 ms behind the device's own**, a twentieth
+//! of a frame, and is not distinguishable from no delay at all. `PROTOCOL.md`
+//! has the method and the evidence, `analysis/gatt_phase.py` does the
+//! arithmetic, and `shokushu-gatt --phase` takes the samples.
+//!
+//! Read the upper end as the content and the zero as an artefact: the
+//! advertisement stream gives the tightest lower bound on the offset of any
+//! stream measured, so it reads zero by construction. The sub-frame bias of
+//! about 3.6 ms is *inside* the figure rather than beside it — a round trip
+//! bounds the total a reading is behind by and cannot take that total apart,
+//! which is what a separately calibratable transport like LTC would be for.
+//! And none of it changes what this module does: the offset is still a constant
+//! nothing here removes, only one whose size is now known rather than argued.
 //!
 //! # How long it holds
 //!
