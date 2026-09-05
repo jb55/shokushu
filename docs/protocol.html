@@ -1612,6 +1612,56 @@ model number         six bytes that aren't text, then a NUL</pre>
         </p>
       </div>
 
+      <h3>One connection brackets the offset; the advertisements are the slow part</h3>
+      <div class="evidence">
+        <div class="claim">One 6.6 s connection is enough to bracket the offset <span class="badge b-inferred">Inferred</span></div>
+        <p>
+          The capture above took 15 connections over 314 s, and did not need to
+          for the bracket. One connection yields about 81 round trips, and a
+          bracket is a minimum over them — a minimum over fewer samples sits
+          <em>higher</em>, so a short capture reports a bracket that is too wide
+          rather than too narrow. That is the safe direction. What the extra
+          connections buy is the two diagnostics: the connected-against-free-running
+          comparison needs about 4.5 connected advertisements per connection and
+          so a dozen connections to reach a useful matched count, and a drift rate
+          fitted from block midpoints needs three separated blocks of round trips.
+          Both are worth having and neither changes the offset, which is why
+          <code>shokushu-ble --jam</code> opens one connection and
+          <code>shokushu-gatt --phase --reconnect</code> still exists for the rest.
+        </p>
+        <div class="claim">Theta measured in a 6.6 s window goes stale against advertisements pooled afterwards <span class="badge b-inferred">Inferred</span></div>
+        <p>
+          <code>a</code> carries <code>θ</code> as it was during the connection
+          and <code>b</code> carries <code>−θ</code> whenever the advertisement
+          landed, so a later advertisement has a smaller <code>b</code> and wins
+          the floor for a reason that is drift rather than delivery. With one
+          connection there is a single block and so no slope to de-trend with. The
+          quantity being eaten into is not the 3.4 ms round-trip bracket but the
+          <b>2.05 ms</b> the two relevant floors leave — 1.7 ms outbound on a
+          read, 0.35 ms on an advertisement — since that sum is what the
+          advertisement's staleness bracket spans:
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:460px">
+            <thead><tr><th>Advertisements pooled for</th><th class="num">Drift at 8.6 ppm</th><th>Effect on the offset</th></tr></thead>
+            <tbody>
+              <tr><td class="num">30 s</td><td class="num m">0.26 ms</td><td>quoted 0.13 ms low</td></tr>
+              <tr><td class="num">60 s</td><td class="num m">0.52 ms</td><td>quoted 0.26 ms low, on a true ~1.02 ms</td></tr>
+              <tr><td class="num">240 s</td><td class="num m">2.06 ms</td><td>exceeds the 2.05 ms; the bounds cross</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Past about four minutes the pooled bounds on <code>θ</code> cross and
+          the capture is refused rather than reducing to a plausible number near
+          zero — the arithmetic catching its own limit, the same way the
+          negative-bracket check does. <code>shokushu-ble --jam</code> pools for
+          60 s for that reason. All of this is arithmetic over the measured floors
+          and the measured drift rather than a fresh measurement, which is why it
+          is inferred.
+        </p>
+      </div>
+
       <h3>Reads and notifications cannot be told apart on macOS</h3>
       <div class="evidence">
         <div class="claim">A read taken while subscribed is not a round trip <span class="badge b-measured">Measured</span></div>
@@ -1716,6 +1766,57 @@ model number         six bytes that aren't text, then a NUL</pre>
           reference is the same tool that perturbs the signal, and nothing in the
           capture looks wrong when it happens. The check that caught it —
           comparing the two populations at matched sample counts — costs nothing.
+        </p>
+      </div>
+
+      <h3>Three boxes agree to a third of a millisecond, passively</h3>
+      <div class="evidence">
+        <div class="claim">Three boxes jam synced from the same master agree to about a hundredth of a frame <span class="badge b-measured">Measured</span></div>
+        <p>
+          Two boxes' offset against each other can be measured without connecting
+          to either, which nothing above can do for a box on its own. For each
+          reading, <code>host arrival − device stamp</code> is that box's delivery
+          delay minus its own clock offset; the delivery <em>floors</em> are the
+          same quantity for two identical radios at the same distance from one
+          host, so differencing two boxes' floors cancels the delay and the
+          free-running host clock together and leaves how far apart the two boxes
+          are. <code>analysis/box_agreement.py</code> does it, at matched sample
+          counts for the usual reason.
+        </p>
+        <p>
+          Ricki, Liliana and Sun at 24 fps, over one 90 s passive capture — 811
+          readings, matched at n=263 per box, with no connection opened to any of
+          them before or during:
+        </p>
+        <div class="scroll-x">
+          <table style="min-width:420px">
+            <thead><tr><th>Box</th><th class="num">Against the earliest</th><th class="num">Of a frame at 24 fps</th></tr></thead>
+            <tbody>
+              <tr><td>Sun</td><td class="num m">0 (reference)</td><td class="num">0.000</td></tr>
+              <tr><td>Ricki</td><td class="num m">+0.144 ms</td><td class="num">+0.003</td></tr>
+              <tr><td>Liliana</td><td class="num m">+0.327 ms</td><td class="num">+0.008</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          All three floors had stopped moving by the end — the last convergence
+          step shifted each by under 0.1 ms, against the 0.33 ms being reported —
+          so the spread is the boxes and not the sample size.
+        </p>
+        <p>
+          The equal-floors assumption is the one thing carrying this, and it is
+          the reason for a minimum rather than a mean: a mean would carry each
+          box's whole delay distribution, which differs with signal strength and
+          how often it is heard from, while a floor is the best case of a path and
+          the best case of two like radios should agree. The three RSSIs here
+          spanned −29 to −39 dBm and the answer did not order itself by signal
+          strength, which is weak evidence for the assumption and not a test of
+          it.
+        </p>
+        <p>
+          This is the baseline the desync question under <b>Open questions</b>
+          wants. It says nothing yet about whether connecting moves a box — that
+          needs the same measurement again with a connection in between.
         </p>
       </div>
 
@@ -2065,7 +2166,7 @@ Liliana   (zeros)              ->   04 09 1a  0c 2f 14      4 Sep 26,           
               </tr>
               <tr>
                 <td><b>Whether connecting to a box knocks it off a shared timeline</b><br><span style="color:var(--ink-soft)">Two boxes have been seen out of sync after sessions of GATT work, and nothing here writes to a box. Three candidates, none tested: a connection re-jamming it, though <code>0dab1280</code> holds the last sync time and stayed byte-identical across many reconnects, which argues against; the recovery rather than the connection, since a box wedged by rapid reconnects and then power-cycled comes back unjammed; or ordinary drift, two boxes 8.6 ppm apart separating by 0.74 s a day.</span></td>
-                <td>Measure two boxes' offset against each other passively, where the host clock cancels, connect once to one of them, and see whether that offset moved.</td>
+                <td><b>Half done.</b> The passive measurement exists — <code>analysis/box_agreement.py</code>, and <b>Three boxes agree to a third of a millisecond</b> above has the baseline: Ricki, Liliana and Sun within 0.33 ms with nothing connected. Outstanding is the second half, the same capture with one connection in between, which <code>shokushu-ble --jam --name &lt;box&gt;</code> is exactly.</td>
               </tr>
             </tbody>
           </table>
