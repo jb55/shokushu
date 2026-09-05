@@ -88,13 +88,6 @@ adapter state: PoweredOn — scanning until interrupted
 no timecode: 2 devices advertising 0xFDAC, but 22 of 22 payloads did not decode — Liliana last sent 22 7d 19 0b 3b 13 00 93 bf (--raw -a dumps them all; see PROTOCOL.md)
 ```
 
-That one is the failure that prompted this: a header byte changed and every
-advertisement was being rejected. Other things it will tell you are that a
-`--name` filter matched none of the devices in range, that devices are in range
-but none of them advertise `0xFDAC`, or that nothing at all is arriving — which
-points at the scan rather than the boxes. The bytes are included because a wire
-format that has moved cannot be worked out from a count of failures.
-
 It stays out of the way once timecode is flowing: the line is given up the
 moment there is a reading to draw, `--json` emits no diagnostics at all, and
 redirecting stderr to a file gets one line per thing that actually changed
@@ -105,96 +98,6 @@ Worth being clear about: interpolating makes the display *smooth*, not more
 left alone for that reason — it emits the readings that actually arrived, and
 nothing interpolated.
 
-The accuracy comes from the sub-frame field instead: it's a microsecond counter,
-which places a reading to about 0.6 ms where the frame number alone manages
-13 ms. What can't be done from here is clocking anything — one or two readings a
-second tells you what time it is, and for syncing to picture you still want LTC
-over audio.
-
-macOS will ask for Bluetooth permission the first time.
-
-### The advertisement format
-
-Documented in full in [PROTOCOL.md](PROTOCOL.md), with the evidence behind each
-claim and what's still unknown — there's a formatted copy at
-[docs/protocol.html](docs/protocol.html). None of it comes from a published
-spec; `--raw` is how it was worked out. The short version:
-
-```
-22 7d | 19 0b 25 28 15 | 5f c6     fps=25, 11:37:40:21, 24518 µs into the frame
-42 7d | 00 26 09 04 02 | a1 00     2026-09-04
-```
-
-Service UUID `0xFDAC`, nine bytes, a record type and a flags byte ahead of a
-five-byte data field, with a big-endian microsecond counter in the trailer.
-
-Note the layout is **fixed, not self-describing**. Byte 1 held `0x05` in every
-early capture, which is exactly the width of the data field, and reading it as a
-length looked safe for as long as nobody changed it. Syncing the boxes to the
-Tentacle phone app changed it to `0x7d` while the packets stayed nine bytes, at
-which point every advertisement was rejected and the scanner showed an empty
-screen with no explanation. Don't derive the field from it.
-
-Three things to know before extending this. **Discovery has to key on the service
-UUID, not on a name** — the advertised name is whatever the owner called the
-device, so a scanner looking for "Tentacle" finds nothing. **Timecode is plain
-binary, not BCD**, which is easy to get backwards because most samples look like
-valid BCD; the date record, inconsistently, *is* BCD. And **the frame rate
-arrives as a whole number**, so 29.97 and 30 are indistinguishable over the air
-and no drop-frame flag is broadcast at all. Only 25 and 24 fps have been
-observed.
-
-### shokushu-probe
-
-Everything above listens and never transmits. `shokushu-probe` is the exception,
-and is kept separate for that reason: it connects to each Tentacle in range,
-lists its GATT services and characteristics, and reads the standard Device
-Information and battery ones.
-
-```
-$ shokushu-probe
-=== Ricki  [7806a574-7711-abac-3737-c42b79c16804]
-  00002a29-…  (manufacturer name)   = "Tentacle Sync GmbH"
-  00002a27-…  (hardware revision)   = "1.2 SYNCE2"
-  …
-```
-
-It exists to answer a question — is the charge level available anywhere other
-than the advertisement? — and the answer is no: there is no Battery Service on
-this device. Reach for it when a new firmware appears and that might have
-changed, not as part of reading timecode. Connecting is not free; it can disturb
-the advertising that the rest of this depends on, and it is per-device. The
-vendor characteristics, one of which is writable, are listed but never touched.
-
-### shokushu-gatt
-
-`shokushu-probe` says what the GATT tree *is*; `shokushu-gatt` says what the
-vendor service in it *says*. It connects, reads the three `READ | NOTIFY`
-characteristics under `0xfdac`, subscribes to all three, and logs everything the
-device pushes with a host timestamp. It writes nothing.
-
-```
-$ shokushu-gatt --name ricki                 # read and subscribe for 120 s
-$ shokushu-gatt --seconds 300 --reconnect    # keep reconnecting; the box hangs up every 7 s
-$ shokushu-gatt --scan                       # log advertisements on the same timeline
-$ shokushu-gatt --no-subscribe --poll-ms 500 # read only, no notifications
-```
-
-The useful part is the closing summary: per characteristic, how many
-notifications arrived, how many were distinct, and how many values each byte
-position took — which is how the fields were found.
-
-Two things it established. `0dab144c` carries the timecode with the
-advertisement's two header bytes removed, one sample per 30 ms connection event,
-so **every frame arrives** against the advertisement's 1.4–1.8 readings a
-second. And the box drops any connection after about 6.6 s no matter what the
-client does, which is why `--reconnect` exists. See
-[`PROTOCOL.md`](PROTOCOL.md) for the rest.
-
-The write characteristic, `0dab17e4`, is how the Tentacle app sets a device's
-clock and name. This tool does not touch it and neither should you without a
-sniffer capture of the app doing it first — a guessed payload is how a box ends
-up needing a factory reset.
 
 ## shokushu-rec
 
@@ -220,41 +123,6 @@ wrote ricki_2026-09-04_20-29-46-18.wav — 29.995 s, 1439744 frames at 48000 Hz,
   first sample at 20:29:46:18 24 fps, 3541765357 samples since midnight, 2026-09-04
   the input's clock ran -178 ppm against Ricki's over 30 s (±67 ppm)
 ```
-
-The stamp goes in `bext`'s `TimeReference`, which is what an NLE actually syncs
-on, and it is a count of **samples** rather than frames — so the sub-frame field
-in the advertisement survives into the file instead of being rounded to the
-40 ms frame it fell in. The frame rate goes in an iXML chunk alongside, `bext`
-having nowhere to put one. `wav::Bwf` writes both and is ungated, so a file
-like this costs no dependencies.
-
-The start time is not the timecode that happened to be on screen when recording
-began. It is the clock extrapolated back to the instant the first sample was
-*captured*, which is not the instant the callback holding it ran: `cpal` reports
-both, and at 512 frames and 48 kHz the difference is over 10 ms — a quarter of a
-frame at 25 fps, all of it in the same direction. That leaves a start time good
-to a millisecond or two.
-
-What it does not buy is clocking. The interface keeps its own time once
-recording starts and nothing here steers it, which is what the last line
-measures: two readings of the box's clock, one at each end of the take, against
-the sample count in between. The ±figure is the anchor error over the baseline,
-so a short take says nothing and a long one says something — the -178 ppm above
-is that USB interface's crystal, and it reproduced within noise across three
-takes and two different boxes. If it matters, the answer is LTC on a track, not
-Bluetooth.
-
-Timecode is needed to *start* and not to continue. Losing the signal mid-take is
-a non-event: the stamp was written when the file was opened, and the recording
-carries on with a note on the line. Ctrl-C is a clean stop — the two size fields
-at the top of the file are all that separate a finished recording from an
-interrupted one, and they get written.
-
-The date is a separate, much rarer advertisement, and it only fills in `bext`'s
-OriginationDate. Waiting for it costs no audio: the input is already running and
-its samples queue up behind the wait, so what stands still is the file, not the
-take. After five seconds the header goes down without one rather than guessing
-from the host's calendar, which a box need not agree with.
 
 ## Using it as a library
 
@@ -299,6 +167,14 @@ nothing in range, something in range whose payload no longer decodes, or a scan
 delivering nothing at all. It carries the counts and no wording, because the
 sentence that suits a terminal names flags a GUI hasn't got; `shokushu-ble`
 writes its own.
+
+### The advertisement format
+
+Documented in full in [PROTOCOL.md](PROTOCOL.md), with the evidence behind each
+claim and what's still unknown — there's a formatted copy at
+[docs/protocol.html](docs/protocol.html). None of it comes from a published
+spec; `--raw` is how it was worked out. The short version:
+
 
 ### Features
 
@@ -348,66 +224,6 @@ Drop-frame arithmetic is deliberately not implemented: drop-frame skips frame
 *numbers*, so `frame_position` would be wrong for it. It debug-asserts, and
 `checked_frame_position` returns `None`, rather than quietly handing back a
 number that's off by a couple of seconds a day.
-
-## Wiring it to a Mac
-
-The catch is the 3.5 mm jack. It auto-detects what's plugged in, and a
-three-conductor **TRS** plug — which is what the Tentacle's standard cable ends
-in — reads as headphones. macOS then offers an *output* on the jack and no input
-at all, so there is nothing for this program to listen to. Check with:
-
-```
-$ system_profiler SPAudioDataType | grep -A2 'External'
-```
-
-If that says `External Headphones` and `--list-devices` shows no external input,
-the signal isn't reaching the computer. Two ways around it:
-
-- **A TRRS adapter.** The jack only exposes a microphone on the sleeve of a
-  four-conductor CTIA plug. A TRRS headset splitter (one TRRS male out to
-  separate mic and headphone TRS females) works: plug the Tentacle into the
-  microphone side. macOS then shows an `External Microphone` device.
-- **A USB audio interface.** Any interface with a line or mic input, which also
-  avoids the level mismatch below.
-
-The Tentacle's output is hotter than a computer mic input expects. Clipping does
-no harm here — LTC is a square wave and the decoder only looks at where it
-crosses zero — but if the input distorts badly, pad it or turn the Tentacle's
-output level down in the Tentacle app.
-
-macOS will also ask for microphone permission the first time; without it the
-stream opens but delivers silence.
-
-## How LTC decoding works
-
-LTC packs 80 bits into every video frame, biphase-mark encoded: each bit cell
-opens with a transition, and a `1` adds a second one in the middle. So a `0` is
-one long gap between transitions and a `1` is two short ones. That makes the
-code self-clocking, readable at any speed, and indifferent to which way round
-the cable is wired.
-
-`src/ltc.rs` does the decoding in three stages, all streaming and allocation-free:
-
-1. **Transition detection.** A one-pole DC blocker removes the offset, a decaying
-   peak envelope sets a hysteresis threshold at 25% of the signal, and crossings
-   of that threshold are timed in samples.
-2. **Biphase demodulation.** An interval longer than ¾ of the running bit-period
-   estimate is a `0`; two shorter ones make a `1`. Each decoded cell nudges the
-   period estimate, so the decoder locks onto 24/25/29.97/30 fps on its own
-   rather than being told the rate.
-3. **Frame assembly.** Bits shift into an 80-bit register. The last 16 bits of
-   every frame are the sync word `0x3FFD` — twelve consecutive ones, which the
-   payload can't produce — so spotting it exactly 80 bits after the previous one
-   both confirms alignment and delimits the frame. BCD fields out of range are
-   rejected, which catches a bit slip that happened to land on a sync pattern.
-
-The frame rate is reported from the locked bit period. 23.976 and 29.97 sit
-within 0.1% of 24 and 30, closer than that estimate resolves; the drop-frame flag
-is the only reliable way to tell 29.97 apart, and there's no way at all to
-distinguish 23.976 from 24.
-
-Reverse playback (LTC read tail-first) isn't decoded — a free-running generator
-like the Tentacle never produces it.
 
 ## Tests
 
