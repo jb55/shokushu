@@ -82,6 +82,11 @@
 //! audio samples into frames, and [`freerun`] turns either into a clock. None
 //! of them do any I/O, so none of them can fail.
 //!
+//! [`wav`] is ungated too, and is the other end of the same journey: it writes
+//! a Broadcast Wave file with a reading stamped into it, which is how a
+//! recording made here lands on somebody else's timeline. It writes a file, so
+//! it can fail, but only in the ways `std::fs` can.
+//!
 //! [`jam`] is in the same position and for the same reason. It is arithmetic
 //! over samples somebody else collected — it measures how far behind a device's
 //! own clock a reading lands, so that [`freerun::FreeRun::jam`] can take the
@@ -111,6 +116,7 @@ pub mod freerun;
 pub mod jam;
 pub mod ltc;
 pub mod timecode;
+pub mod wav;
 
 /// Errors from anything that talks to hardware.
 ///
